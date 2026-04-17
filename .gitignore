@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Env / secrets (NEVER commit)
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+ibkr_credentials*
+
+# Kill switch lock (created at 10% drawdown; human-only deletion -- never commit)
+.killed
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
+
+# Pending-sync mailbox is a directory of session-defer entries -- contents not committed
+.pending-sync/*
+!.pending-sync/.gitkeep
+
+# Built artifacts
+dist/
+build/
+*.log
