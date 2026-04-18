@@ -4,6 +4,39 @@ Session-by-session ship log. Append-only. New entries on top.
 
 ---
 
+## 2026-04-18 -- Phase 2 Bundle 1: safety + observability foundation (m2.3, m2.4, m2.7)
+
+**Commit:** `befc26b` feat: Phase 2 Bundle 1 -- safety + observability foundation (m2.3, m2.4, m2.7)
+
+**What shipped:** First Phase 2 code bundle per `K2Bi-Vault/wiki/planning/phase-2-bundles.md` Bundle 1. Three milestones land together because none is testable in isolation: validators reject bad orders, breakers halt the engine on drawdown, decision journal records every verdict. Every subsequent Phase 2 bundle reads or writes against these.
+
+m2.3 ships five pre-trade validators (`execution/validators/`): `instrument_whitelist`, `market_hours`, `position_size`, `trade_risk`, `leverage`, plus a runner that short-circuits on first rejection with no override flag. NYSE session logic uses `exchange_calendars` XNYS (holidays + real pre/after-market windows, not just weekday-only). Concentration checks mark existing inventory from `ctx.current_marks` populated by the engine, with a non-user-controlled `position.avg_price` fallback; the caller's `limit_price` is never used as a mark for held inventory. Market-hours authoritative clock is `ctx.now`, not the spoofable `order.submitted_at`.
+
+m2.4 ships circuit breakers (`execution/risk/circuit_breakers.py`) + `.killed` lock file (`execution/risk/kill_switch.py`). Daily soft -2%, daily hard -3%, weekly -5% (requires full 5-session window before engaging so the first week after startup can't false-trigger), total -10% writes `.killed`. The kill-switch module exposes no delete API — human-only unlock per `risk-controls.md`. `.killed` writes are first-writer-wins via atomic `os.link` + parent-directory fsync; concurrent breaker / Telegram kills are race-safe across processes. `apply_kill_on_trip` is idempotent across ticks (no journal / Telegram spam while the breaker stays tripped).
+
+m2.7 ships the append-only JSONL decision journal (`execution/journal/writer.py`). Path: `K2Bi-Vault/raw/journal/YYYY-MM-DD.jsonl`. Schema v1 per architect greenlight 2026-04-18: `ts` (UTC ISO-8601 microsecond-precision, always), `schema_version`, `event_type` enum (includes `recovery_truncated` for silent-loss prevention), `trade_id` lifecycle ULID, `journal_entry_id` per-record ULID, `strategy`, `git_sha`, `payload`, optional `error`/`metadata`/`ticker`/`side`/`qty`. Writes hold an exclusive flock on a sidecar lock file; reads take a shared flock on the same sidecar (Bundle 5 m2.18 P&L reader now race-safe by design). Fresh daily files fsync the parent dir. Startup recovery atomically renames complete lines + a `recovery_truncated` marker in one operation — no crash window between truncation and marker emission. A record missing only its trailing newline is parsed first: if it's valid JSON the newline is appended in place (no silent loss of a successfully-written record).
+
+Cash-only invariant consolidation per architect flag: `execution/risk/cash_only.py` is the single canonical naked-short gate. Leverage validator delegates to `cash_only.check_sell_covered`; every other module under `execution/validators/` and `execution/engine/` carries a header comment declaring whether it touches sell-side paths. That's the guardrail so Bundle 2's engine main loop can't reintroduce the scattered enforcement pattern that caused Codex rounds 1-3 to each find a different naked-short scenario.
+
+Schema reference doc written to `K2Bi-Vault/wiki/reference/journal-schema.md` (v1 + evolution rules). Planning update: `wiki/planning/phase-2-bundles.md` captures the full 6-bundle plan; `wiki/planning/index.md` bumped to 18 entries.
+
+**Codex review:** 11 rounds. Rounds 1-10 surfaced 22 category-(a) correctness bugs in safety-critical paths — lock semantics, naked-short scenarios, UTC/day-boundary normalization, extended-hours windows, mark-source ambiguity, crash durability, concurrent reader/writer races. All addressed inline with regression tests (tests grew from 21 initial to 87 final). Round 11: clean pass, "did not find any discrete, actionable bugs." Architect stop condition `(a) = 0` met. Full finding ledger by round captured in the round-by-round review dialogue; not duplicated here to keep DEVLOG signal-to-noise.
+
+**Feature status change:** shipped as `--no-feature` (K2Bi `wiki/concepts/` lane structure still absent; Phase 2 tracking lives in `wiki/planning/phase-2-bundles.md`).
+
+**Follow-ups:**
+- Bundle 2 (m2.5 IBKR connector + m2.6 engine main loop + m2.8 invest-execute skill) is next. The engine main loop MUST import `execution.risk.cash_only.check_sell_covered` before any sell reaches the connector (belt over the validator runner's suspender) — engine `__init__.py` header comment documents this contract.
+- `K2Bi-Vault/wiki/reference/journal-schema.md` starts at v1. Bump to v2 only when promoting a `metadata` key to top-level; old records stay at v1 and readers must handle both.
+- `exchange_calendars` pinned at `>=4.5` in `requirements.txt`. The hard-coded 2026/2027 holiday fallback was replaced with the library; if the dep breaks in a fresh env, engine startup fails loud (intentional — no silent holiday bypass).
+
+**Key decisions:**
+- Single commit for all three milestones. Bundle 1 is indivisible by design: validators without a journal are untestable (no audit trail), breakers without validators are untriggered, journal without writers is unused. Split would have been ceremony, not safety.
+- Codex loop continued past the architect's first proposed stop at round 8. Rounds 8-10 each surfaced one more real (a) bug; stopping at 8 would have shipped the timestamp-spoof + silent-recovery-loss scenarios. Round 11 is the real stop — first clean pass, not a timeout.
+- Refused margin mode (`cash_only=False`) outright at validator time rather than patching the four margin-mode bypass paths Codex found in round 2. Phase 4+ will ship a proper margin design; half-working margin code now is a footgun.
+- Consolidated cash-only enforcement into `execution/risk/cash_only.py` after round 7, when the architect flagged that rounds 1-3 each found a different naked-short scenario. The module is a load-bearing architectural decision for Bundle 2+ — any new sell-side path must import it, never re-implement the rule.
+
+---
+
 ## 2026-04-18 -- /sync: deploy script extended for Phase 2 scaffold paths
 
 **Commit:** `b96b908` chore: extend deploy-to-mini.sh for Phase 2 scaffold paths
