@@ -1,0 +1,75 @@
+# scripts/deploy-config.yml -- single source of truth for the Mac Mini deploy pipeline.
+#
+# Both scripts/deploy-to-mini.sh and the /invest-ship step 12 preflight read this file.
+# The deploy script builds rsync invocations from `targets:`; the preflight validates
+# every top-level repo entry is either covered by `targets:` or explicitly in
+# `excludes:`. Any top-level dir that is neither is a drift signal that blocks /ship
+# until Keith resolves it (add to targets for new deploy coverage, or to excludes for
+# intentionally-local paths like design docs).
+#
+# Categories mirror the four lanes invest-ship tracks for /sync mailbox routing:
+#   skills    -- CLAUDE.md, .claude/skills/, .claude/settings.json, README.md, DEVLOG.md
+#   execution -- execution/ tree + requirements.txt (Python deps for the engine)
+#   scripts   -- scripts/ tree (includes scripts/hooks/ if it lands later)
+#   pm2       -- pm2/ daemon manifest (populated in Phase 6+)
+#
+# When adding a new deployed path: append one row to `targets:` with its category.
+# When adding a new intentionally-undeployed path: append one row to `excludes:`.
+# When adding a brand new category: update BOTH this file AND invest-ship SKILL.md's
+# category table (step 1 scope detection), since `/invest-ship --defer` writes the
+# category into the .pending-sync/ mailbox and /sync must know how to route it.
+
+targets:
+  # skills lane -- Claude Code behavior + top-level docs
+  - path: .claude/skills/
+    category: skills
+  - path: .claude/settings.json
+    category: skills
+  - path: CLAUDE.md
+    category: skills
+  - path: README.md
+    category: skills
+  - path: DEVLOG.md
+    category: skills
+  # execution lane -- Trader-tier Python engine
+  - path: execution/
+    category: execution
+  - path: requirements.txt
+    category: execution
+  # scripts lane -- deploy, single-writer helpers, reviewer wrappers, future scripts/hooks/
+  - path: scripts/
+    category: scripts
+  # pm2 lane -- daemon manifest (Phase 6+ populates this)
+  - path: pm2/
+    category: pm2
+
+excludes:
+  # VCS + IDE
+  - .git
+  - .githooks                    # hooks run on commit on MacBook only; Mini is Trader tier
+  - .gitignore                   # ships via `git clone`, not rsync
+  # Claude Code runtime artifacts (local-only)
+  - .claude/plugins
+  - .claude/plans
+  - .claude/projects
+  - .claude/settings.local.json  # gitignored per-machine override
+  # Python + node detritus
+  - .venv
+  - __pycache__
+  - .pytest_cache
+  - .ruff_cache
+  - .mypy_cache
+  - node_modules
+  - build
+  - dist
+  # Mailbox + reviewer archives (per-machine, never shipped)
+  - .pending-sync
+  - .minimax-reviews
+  # Vault is Syncthing-managed, not rsync-managed
+  - K2Bi-Vault
+  # Design docs + research workspace (MacBook dev tier only)
+  - proposals
+  - plans
+  - .claude/plans                # duplicate of above for belt-and-braces parsing
+  # Tests run locally (Mac Mini runs the engine, not the test suite)
+  - tests

@@ -114,15 +114,16 @@ Categorize touched files into:
 
 | Category | Matching paths | Needs /sync? |
 |----------|---------------|--------------|
-| skills    | `.claude/skills/`, `CLAUDE.md`, `K2B_ARCHITECTURE.md` | yes |
-| code      | `k2b-remote/` | yes (build + pm2 restart k2b-remote) |
-| dashboard | `k2b-dashboard/` | yes (build + pm2 restart k2b-dashboard) |
-| scripts   | `scripts/` including `scripts/hooks/` | yes |
+| skills    | `.claude/skills/`, `.claude/settings.json`, `CLAUDE.md`, `README.md`, `DEVLOG.md` | yes |
+| execution | `execution/`, `requirements.txt` | yes (Python deps + engine restart on Mini) |
+| scripts   | `scripts/` including `scripts/hooks/` and `scripts/lib/` | yes |
+| pm2       | `pm2/` (Phase 6+ populates this) | yes (pm2 restart on Mini) |
 | vault     | `K2Bi-Vault/` | no (Syncthing) |
-| plans     | `.claude/plans/` | no |
-| devlog    | `DEVLOG.md` | no |
+| plans     | `plans/`, `.claude/plans/` | no |
+| proposals | `proposals/` | no |
+| tests     | `tests/` | no (tests run locally; Mini runs the engine) |
 
-**Category names must match `/sync`'s category table exactly.** `/sync` currently defines: `skills`, `code`, `dashboard`, `scripts`. Any category label that `/ship --defer` writes into a mailbox entry must be one of those four -- otherwise `/sync` would consume the entry without a deploy target, silently dropping the change. In particular, `scripts/hooks/**` rolls up into `scripts` (not a separate `hooks` category): the deploy script's `scripts` mode already rsyncs `scripts/` recursively, which covers hooks.
+**The four sync categories (`skills`, `execution`, `scripts`, `pm2`) are the single source of truth anchored in `scripts/deploy-config.yml`.** Run `python3 scripts/lib/deploy_config.py list-categories` to see the live list. Any category label that `/ship --defer` writes into a mailbox entry must be one of those four -- otherwise `/sync` would consume the entry without a deploy target, silently dropping the change. To classify a specific file, pipe it through `python3 scripts/lib/deploy_config.py classify <path>`. In particular, `scripts/hooks/**` rolls up into `scripts` (not a separate `hooks` category): the deploy script's `scripts` mode already rsyncs `scripts/` recursively, which covers hooks.
 
 If there are NO changes at all, report "No changes to ship" and stop.
 
@@ -390,9 +391,25 @@ fi
 
 For K2B, the script exists -- flow continues as normal. For K2Bi (Phase 1 through Phase 3), no Mini provisioning exists yet, so the sync question is meaningless and the mailbox entry would be a dead letter. Once K2Bi gets its own `deploy-to-mini.sh` in Phase 4, this check starts passing and the rest of step 12 engages automatically.
 
-If the deploy script exists, continue:
+**Deploy-coverage preflight (required when deploy script exists):** before any sync-now / defer prompt, run the deploy-config.yml drift check. A top-level path that is not covered by `targets:` AND not in `excludes:` is a silent-deploy bug waiting to happen (the path gets added locally, nobody updates the deploy script, the Mini goes out of sync undetected). The preflight blocks /ship entirely until Keith resolves the drift -- he cannot defer what cannot be routed.
 
-If any files in categories `skills`, `code`, `dashboard`, or `scripts` were in the commits, the Mac Mini is now out of date with the pushed code. (`scripts/hooks/**` rolls up into `scripts` -- do not write a separate `hooks` category into mailbox entries, `/sync` has no deploy target for it and would silently drop the change.) A soft reminder is not enough because it can be missed and leaves no recovery signal. Ask Keith an explicit question:
+```bash
+if [ -x scripts/lib/deploy_config.py ]; then
+  if ! python3 scripts/lib/deploy_config.py preflight; then
+    echo ""
+    echo "Fix the drift above before /ship continues. Either:"
+    echo "  - add the path to scripts/deploy-config.yml under 'targets:' (with its category)"
+    echo "  - add the path to scripts/deploy-config.yml under 'excludes:' (local-only)"
+    exit 1
+  fi
+fi
+```
+
+The preflight runs even on `--no-feature` + `--defer` paths, because mailbox entries carry category labels derived from deploy-config.yml; drift breaks the mailbox schema too.
+
+If the deploy script exists AND the preflight passes, continue:
+
+If any files in categories `skills`, `execution`, `scripts`, or `pm2` (the live `scripts/deploy-config.yml` category set; run `python3 scripts/lib/deploy_config.py list-categories` to confirm) were in the commits, the Mac Mini is now out of date with the pushed code. (`scripts/hooks/**` rolls up into `scripts` -- do not write a separate `hooks` category into mailbox entries, `/sync` has no deploy target for it and would silently drop the change.) A soft reminder is not enough because it can be missed and leaves no recovery signal. Ask Keith an explicit question:
 
 > Project files changed (list the categories + files). Run `/sync` now, or defer to a later session?
 > - **now** -- invoke `/sync` in-line, confirm it completed, done
