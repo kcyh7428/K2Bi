@@ -4,6 +4,35 @@ Session-by-session ship log. Append-only. New entries on top.
 
 ---
 
+## 2026-04-18 -- /sync: deploy script extended for Phase 2 scaffold paths
+
+**Commit:** `b96b908` chore: extend deploy-to-mini.sh for Phase 2 scaffold paths
+
+**What shipped:** `scripts/deploy-to-mini.sh` learned the Phase 2 scaffold paths (`execution/`, `pm2/`, `.claude/settings.json`). The Mini had been drifting from the MacBook since `fcf2049` because the Phase 1 script only covered `.claude/skills/`, top-level docs, and `scripts/`. Two new helpers (`sync_singleton`, `sync_tree_or_delete`) give the script proper delete-consistency: local renames or removals now mirror to the Mini instead of leaving stale files on the remote. `categorize()` and `detect_changes()` were narrowed so Claude Code's local-only runtime artifacts (e.g. `.claude/scheduled_tasks.lock`) no longer trigger no-op deploys. This ship closes the P2 follow-up flagged by Codex in the Teach Mode DEVLOG entry.
+
+**Session-opening action:** Before the script changes were committed, an `/invest-sync` run consumed two deferred-sync mailbox entries (from `597e052` and `fcf2049`) and synced their files to the Mini. A category-vs-deploy-target mismatch surfaced during that run — entries tagged `skills` but containing `execution/`, `pm2/`, and `.claude/settings.json` paths that the Phase 1 script didn't know how to deploy. That gap is what this ship closes. The pre-edit sync handled the deployable subset; a post-ship re-sync pushes the extended script itself to the Mini after this ship lands.
+
+**Codex review:** 4 passes, 6 in-scope P2/P3 findings addressed:
+- Pass 1 — auto-detect missing new dirs (P2); `sync_pm2()` missing `--delete` (P2)
+- Pass 2 — singleton-delete semantics for top-level docs + settings.json (P2)
+- Pass 3 — tree-delete semantics for `execution/` + `pm2/` (P2); `categorize()` over-matching any `.claude/*` path (P3)
+- Pass 4 — `.claude/settings.json` missing from `detect_changes()` untracked scan (P2)
+
+One out-of-scope finding in Pass 4 (P2 on `CLAUDE.md:153` — strategy-gate enforcement claim vs. `commit-msg` hook TODO in `3ff7e10`) was noted and deferred. Pass 5 skipped by Keith (diminishing returns).
+
+**Feature status change:** n/a — `--no-feature` infrastructure ship. K2Bi has no `wiki/concepts/` lane system yet.
+
+**Follow-ups:**
+- Out-of-scope Codex P2 from Pass 4: `CLAUDE.md:153` claims the strategy-gate "How This Works (Plain English)" section is hook-enforced, but `.githooks/commit-msg` still has only a TODO for that check. Either ship the hook check (Phase 2 milestone 2.17) or correct the doc.
+- `/sync` skill body (`.claude/skills/invest-sync/SKILL.md`) category table still lists only `skills`/`code`/`dashboard`/`scripts`. Phase 4+ should add `execution` and `pm2` as first-class category labels in the skill's routing table so `/ship --defer` mailbox entries can be tagged correctly at source.
+
+**Key decisions:**
+- Committed to `main` directly rather than bundling onto the `proposal/teach-mode-pedagogical-layer` branch — keeps the teach-mode PR diff clean. Branch choice was Keith's explicit call after being shown both options.
+- Introduced `sync_tree_or_delete` as a reusable helper when Codex flagged the dir-deletion failure in Pass 3, rather than inlining `ssh rm -rf` logic in each sync function. Future Phase 4+ deploy targets should use the same helper.
+- Stopped the Codex loop after Pass 4 rather than continuing to Pass 5 — diminishing-returns judgment call on a small infra change with 6 findings already addressed.
+
+---
+
 ## 2026-04-18 -- Teach Mode Pedagogical Layer Applied (PR #2 merge + acceptance)
 
 **Commits:**
