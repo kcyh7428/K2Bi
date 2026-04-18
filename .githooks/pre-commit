@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# K2B-Investment pre-commit hook (ported from K2B Tier 1 fix #2 + #8).
+#
+# Check 1: block direct >> wiki/log.md append.
+#   Single writer is scripts/wiki-log-append.sh.
+#   Override: K2BI_ALLOW_LOG_APPEND=1
+#
+# (commit-msg hook handles the status: edit guard for feature_*.md, since
+# pre-commit cannot reliably read the commit message file across git versions.
+# See .githooks/commit-msg.)
+
+set -euo pipefail
+
+LOG_DIRECT=$(git diff --cached | grep -E '^\+.*>>[[:space:]]*\S*wiki/log\.md' || true)
+if [ -n "$LOG_DIRECT" ]; then
+  if [ "${K2BI_ALLOW_LOG_APPEND:-}" = "1" ]; then
+    echo "warning: direct >> wiki/log.md append, K2BI_ALLOW_LOG_APPEND override acknowledged"
+    exit 0
+  fi
+  echo "error: direct >> append to wiki/log.md detected."
+  echo "Use scripts/wiki-log-append.sh as the single writer."
+  echo ""
+  echo "Offending lines:"
+  echo "$LOG_DIRECT"
+  echo ""
+  echo "Override (rewriting the helper itself only): K2BI_ALLOW_LOG_APPEND=1 git commit ..."
+  exit 1
+fi
+
+exit 0

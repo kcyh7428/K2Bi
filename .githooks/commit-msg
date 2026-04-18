@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# K2B-Investment commit-msg hook (ported from K2B Tier 1 fix #8).
+#
+# Check: status: line edits in wiki/concepts/feature_*.md require /ship
+# provenance (Co-Shipped-By: invest-ship trailer) OR K2BI_ALLOW_STATUS_EDIT=1.
+#
+# Runs as commit-msg (not pre-commit) because pre-commit cannot reliably
+# read the commit message file across git versions.
+#
+# NOTE (Phase 1): K2B-Investment does not yet have its own /ship workflow
+# or `wiki/concepts/feature_*.md` lane structure -- those land in a later
+# phase. Until then this hook is a no-op for K2B-Investment-Vault paths.
+# The check is wired up so once feature notes start landing, the discipline
+# is already enforced. The K2B repo trailer convention (Co-Shipped-By:
+# k2b-ship) is also accepted because /ship is reused cross-repo until an
+# invest-ship variant exists.
+
+set -euo pipefail
+MSG_FILE="$1"
+
+STATUS_CHANGES=$(git diff --cached --unified=0 -- \
+  'wiki/concepts/feature_*.md' \
+  'wiki/concepts/Shipped/feature_*.md' \
+  'K2B-Investment-Vault/wiki/concepts/feature_*.md' \
+  'K2B-Investment-Vault/wiki/concepts/Shipped/feature_*.md' \
+  2>/dev/null | grep -E '^[+-]status:' || true)
+
+if [ -n "$STATUS_CHANGES" ]; then
+  if ! grep -qE '^Co-Shipped-By: (k2b-ship|invest-ship)' "$MSG_FILE"; then
+    if [ "${K2BI_ALLOW_STATUS_EDIT:-}" != "1" ]; then
+      echo "error: status: line modified in wiki/concepts/feature_*.md outside /ship"
+      echo ""
+      echo "Changed status lines:"
+      echo "$STATUS_CHANGES"
+      echo ""
+      echo "Use /ship to transition feature status."
+      echo "Override (one-off repairs only): K2BI_ALLOW_STATUS_EDIT=1 git commit ..."
+      exit 1
+    fi
+    echo "warning: status: line edited outside /ship, K2BI_ALLOW_STATUS_EDIT override acknowledged"
+  fi
+fi
+
+exit 0

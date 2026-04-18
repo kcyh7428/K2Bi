@@ -1,0 +1,53 @@
+{
+  "tests": [
+    {
+      "prompt": "Run /journal for 2026-04-03 (evening). Today's captures include: 'NVDA broke out above 142, added 25% to position, stop moved to 138', 'Read TSM Q1 filing -- gross margins held above 53%, thesis intact', 'Watchlist: PLTR setup forming on the daily, level to watch is 24.50', and a note 'Powell speech moved 10Y yields +8bps, regime read still range-bound risk-on'. Yesterday's journal (2026-04-02) has open loops: '- [ ] Re-read MSFT 10-Q before earnings' and '- [ ] Set alert on SPY 510'.",
+      "expected_output": "A compiled journal entry with Positions / Trades, Theses & Research, Watchlist Activity, Market Recap, and Open Loops sections. Should ask clarifying questions before saving.",
+      "assertions": [
+        "Does the output use the file path Daily/2026-04-03.md?",
+        "Does the YAML frontmatter include tags with [journal] and the date 2026-04-03?",
+        "Does it classify the NVDA add and stop move under Positions / Trades (not under another section)?",
+        "Does it classify the TSM filing read under Theses & Research?",
+        "Does it classify the PLTR setup under Watchlist Activity?",
+        "Does it carry forward at least one open loop from yesterday?",
+        "Does K2B-Investment ask at least one clarifying question about the captures before saving?",
+        "Are empty sections omitted (no Insights section if no insight was expressed)?",
+        "Does it treat the Powell macro note as Market Recap rather than a position trade?"
+      ]
+    },
+    {
+      "prompt": "Run /journal for 2026-04-04 (evening). No new vault captures today. One session wrap-up exists in raw/research/: '2026-04-04_session-wrapup-journal-redesign.md' about redesigning the /journal skill. Yesterday's journal has open loop: '- [ ] Re-read MSFT 10-Q before earnings'. No other vault notes created today.",
+      "expected_output": "A minimal journal entry with just Theses & Research (the wrap-up reference) and Open Loops. Should note the quiet day and ask if anything was missed.",
+      "assertions": [
+        "Does it reference the journal redesign session wrap-up somewhere appropriate (Theses & Research or a meta/notes line)?",
+        "Does it carry forward the MSFT 10-Q open loop?",
+        "Does it omit Positions / Trades section (no position activity)?",
+        "Does it omit Watchlist Activity section (no watchlist captures)?",
+        "Does K2B-Investment ask something like 'quiet trading day -- did anything actually move in the book?' or similar?",
+        "Does each section use bullet points, not paragraphs?"
+      ]
+    },
+    {
+      "prompt": "Run /journal for 2026-04-05 (morning). No captures yet today. Yesterday's journal (2026-04-04) has open loops: '- [ ] Re-read MSFT 10-Q before earnings' and '- [ ] Decide on AAPL trim ahead of FOMC'.",
+      "expected_output": "A brief morning mode response showing yesterday's open loops and inviting Keith to capture throughout the trading day.",
+      "assertions": [
+        "Does it show yesterday's open loops (MSFT 10-Q and AAPL trim)?",
+        "Does it link to yesterday's note as [[2026-04-04]]?",
+        "Does it NOT create a full compiled journal entry (morning mode should be brief)?",
+        "Does it suggest running /journal again at the close to compile?",
+        "Does the filename follow YYYY-MM-DD.md convention?"
+      ]
+    },
+    {
+      "prompt": "Run /journal for 2026-04-06 (evening). Captures: 'NVDA Q4 earnings call -- beat top and bottom, guide raised, datacenter +73% YoY', 'Stock fading the print though, watching 138 hold', 'Quick thought -- the AI capex cycle commentary from hyperscalers all week is starting to look like a regime signal worth writing up'. No yesterday open loops. No prior session wrap-ups.",
+      "expected_output": "A journal entry with Theses & Research, Positions / Trades (or Watchlist Activity for the price-level watch), and possibly Insights. All from today's captures only.",
+      "assertions": [
+        "Does it classify the NVDA earnings call recap under Theses & Research?",
+        "Does it classify the AI capex regime observation under Insights?",
+        "Does it handle the price-level watch (138 hold) under Positions / Trades or Watchlist Activity (not Insights)?",
+        "Are there no empty sections with blank bullets?",
+        "Does it ask at least one question (e.g., about the NVDA position size or any open loops)?"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "tests": [
+    {
+      "prompt": "Summarize this conversation: We discussed migrating the legacy IBKR trade history into K2B-Investment. Decided to skip historical trades older than 24 months. Keith will export the executions CSV this week. We also realized the position note template needs an 'entry-thesis' field in frontmatter. Action: update the template, then process the backlog of 5 earnings call transcripts from last week.",
+      "expected_output": "A concise wrap-up note saved to raw/research/",
+      "assertions": [
+        "Does the output include separate Decisions, Action Items, and Insights sections?",
+        "Are action items formatted as checkboxes (- [ ])?",
+        "Does the file path start with raw/research/ and follow the YYYY-MM-DD_session-wrapup-topic.md convention?",
+        "Is the total content under 300 words (excluding frontmatter)?"
+      ]
+    },
+    {
+      "prompt": "Summarize this conversation: Built the invest-vault-writer integration today. It handles creating and updating notes with proper frontmatter, cross-links, and ticker/strategy index integration. Key insight: ticker notes were going stale because no skill was responsible for updating them after research sessions. Fixed by adding an update workflow to vault-writer that other skills call into. Also added update triggers to session-wrapup, journal, and compile skills.",
+      "expected_output": "A wrap-up capturing a development session",
+      "assertions": [
+        "Does it include a wikilink to a relevant ticker or strategy note (e.g., [[NVDA]] or [[strategy_momentum]]) when one is referenced?",
+        "Does the Insights section capture the 'ticker notes going stale' insight?",
+        "Does the YAML frontmatter include type: tldr and source: claude-code-session?",
+        "Does the note avoid em dashes?"
+      ]
+    },
+    {
+      "prompt": "Summarize this conversation: Keith and I reviewed the NVDA Q4 earnings call. Decided to focus on 3 thesis pillars: data-center revenue durability, China export-control overhang, and gross-margin trajectory into next fiscal year. First action is to update the [[NVDA]] thesis page. Keith wants the updated thesis under 200 words with a clear bull/bear delineation. We compared 5 sell-side notes for context.",
+      "expected_output": "A wrap-up capturing an earnings review session",
+      "assertions": [
+        "Does the Decisions section list the 3 thesis pillars?",
+        "Does it include a wikilink to [[NVDA]]?",
+        "Are there wikilinks to relevant notes (e.g., sector or strategy pages)?",
+        "Is the summary genuinely concise (not padding with filler)?"
+      ]
+    }
+  ]
+}

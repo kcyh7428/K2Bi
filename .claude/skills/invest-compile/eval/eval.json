@@ -1,0 +1,37 @@
+{
+  "tests": [
+    {
+      "prompt": "/compile raw/youtube/2026-04-10_youtube_nvda-earnings-recap.md",
+      "expected_output": "A compile summary showing planned wiki page updates/creates, then after approval, executing changes with all 4 index updates and source marking",
+      "assertions": [
+        "Does the output explicitly update the raw subfolder index (raw/youtube/index.md) to reflect the compilation?",
+        "Does the output update at least one wiki subfolder index (e.g. wiki/tickers/index.md or wiki/reference/index.md)?",
+        "Does the output update master wiki/index.md entry counts?",
+        "Does the output call scripts/compile-index-update.py with 3 args (raw source, updated csv, created csv)?",
+        "Does the output mark the raw source frontmatter with compiled: true and compiled-date?"
+      ]
+    },
+    {
+      "prompt": "/compile raw/earnings/2026-04-10_earnings_TSM-Q1-call.md",
+      "expected_output": "Compile summary for an earnings-call source, with ticker page updates, sector page updates, and all index+log updates",
+      "assertions": [
+        "Does the compile summary present a clear approve/skip/edit prompt before making changes?",
+        "Does the output update raw/earnings/index.md (the raw subfolder index for this source type)?",
+        "Does the output check for existing wiki pages before creating new ones (merge not duplicate)?",
+        "Does the output invoke compile-index-update.py exactly once, as an executable command, not as prose?",
+        "Does the output mark the raw source with compiled: true in frontmatter after all updates are done?"
+      ]
+    },
+    {
+      "prompt": "/compile raw/research/2026-04-10_session-wrapup-china-tech-thesis.md",
+      "expected_output": "Compile a session-wrapup source, updating relevant wiki pages and all 4 index points",
+      "assertions": [
+        "Does the output update raw/research/index.md (the raw subfolder index for this session-wrapup)?",
+        "Does the output update the master wiki/index.md entry counts if any new pages were created?",
+        "Does the output present the compile summary BEFORE executing changes (not after)?",
+        "Does the output call the MiniMax compile worker script as the first step (or note the Phase 2 inline fallback)?",
+        "Does the output avoid any direct hand-edit of wiki/<sub>/index.md, raw/<sub>/index.md, wiki/index.md, or wiki/log.md during the compile run?"
+      ]
+    }
+  ]
+}
