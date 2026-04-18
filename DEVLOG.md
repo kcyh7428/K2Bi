@@ -4,6 +4,29 @@ Session-by-session ship log. Append-only. New entries on top.
 
 ---
 
+## 2026-04-18 -- Phase 1 Closure Doc Bundle
+
+**Commit:** `56719c5` docs: point CLAUDE.md at live planning docs in K2Bi-Vault
+
+**What shipped:** Follow-up to Session 3 (`4ea9b70`) that formally closes Phase 1 in documentation. `CLAUDE.md` section "Planning Archive (Historical, Reference Only)" replaced with "Planning Docs (Operational, Live)" pointing at `~/Projects/K2Bi-Vault/wiki/planning/` and listing all 17 planning files (roadmap, architecture, agent-topology, research-infrastructure, nblm-mvp, open-questions, keith-checklist, milestones, data-sources, broker-research, execution-model, risk-controls, research-log, k2b-audit, k2b-audit-fixes-status, feature_k2bi-phase1-scaffold, project_k2bi, plus the index). The K2B-Vault archive at `~/Projects/K2B-Vault/wiki/projects/k2bi/` is now frozen; K2Bi-Vault's copy is the live authoritative version going forward. Companion vault updates (Syncthing, not git) flipped `feature_k2bi-phase1-scaffold.md` to `status: shipped` at `4ea9b70` with all 13 exit criteria marked ✅, updated the Resume Card in `planning/index.md` to reflect closure + Phase 2 as next concrete action (Phase 2a NBLM MVP experiment preceded by two prerequisite decisions), and flipped the `roadmap.md` Phase Lanes table to show Phase 1 SHIPPED with Session 3 + closure-bundle log entries appended.
+
+**Codex review:** clean, 0 actionable findings. Codex verified the referenced live planning paths exist in K2Bi-Vault and that the documentation-only change does not break workflow behavior.
+
+**Feature status change:** shipped as `--no-feature` (K2Bi still has no `wiki/concepts/` lane structure; Phase 1 closure is tracked in `wiki/planning/`). This matches the Session 3 commit's feature-status decision.
+
+**Follow-ups (non-gating, carried to Phase 2):**
+
+- Syncthing K2Bi-Vault folder click-setup between MacBook and Mac Mini (Keith UI, both boxes)
+- Phase 2 port scope: `vault-query.sh` (Dataview DQL helper for invest-lint deep), `yt-search.py` / `send-telegram.sh` / `parse-nblm.py` / `motivations-helper.sh` / `k2b-playlists.json` (K2B YouTube research flow, optional for K2Bi), MiniMax worker scripts for `invest-compile` + `invest-weave`
+- Session 2 active-rules pipeline scripts (`promote-learnings.py`, `audit-ownership.sh`, `select-lru-victim.py`, `demote-rule.sh`) still absent; `/ship` steps 0 and 0a skip gracefully with explicit "skipped (no script in $(pwd))" messages
+
+**Key decisions:**
+
+- Kept the K2B-Vault planning archive frozen rather than deleting it -- preserves history of planning decisions made before K2Bi existed as its own repo, and means the 17 K2Bi-Vault copies are the *authoritative* live version without destroying the K2B-side provenance trail
+- Docs-only ship handled via normal `/ship` workflow with Codex review, not treated as a typo-fix. Section replacement in CLAUDE.md is identity-level prose (where authoritative planning lives), so Checkpoint 2 review applied
+
+---
+
 ## 2026-04-18 -- Phase 1 Session 3: Standalone Independence
 
 **Commit:** `4ea9b70` feat: Phase 1 Session 3 -- standalone K2Bi independence
