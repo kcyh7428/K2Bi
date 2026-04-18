@@ -228,10 +228,29 @@ Cross-phase pillars: NotebookLM as first-class research pillar; monolithic singl
 
 See `NEXT_SESSION.md` in this repo root for the detailed Session 3 plan. Summary: finalize K2Bi standalone independence (fork remaining shared skills, seed memory, set up GitHub remote, configure Mac Mini infrastructure including Syncthing + first /sync, standalone verification, /ship smoke test). Session 3 closes Phase 1. After Phase 1 ships, Phase 2 starts in a new session from this repo.
 
-## Planning Archive (Historical, Reference Only)
+## Planning Docs (Operational, Live)
 
-K2Bi was planned in a separate project's vault before this repo was scaffolded. The planning files are preserved for historical rationale on closed design decisions (agent topology, broker choice, asset class scope, research infrastructure, etc.). They are NOT operational -- do not route runtime behavior through these paths.
+K2Bi's full design documentation lives at `~/Projects/K2Bi-Vault/wiki/planning/` (imported from the initial planning workspace 2026-04-18):
 
-Archive location: `~/Projects/K2B-Vault/wiki/projects/k2bi/` (roadmap, architecture, k2b-audit, keith-checklist, open-questions, skills-design, research-log, milestones, nblm-mvp, broker-research, agent-topology, research-infrastructure, data-sources, execution-model, risk-controls, index).
+- `roadmap.md` -- 6-phase build sequence with Phase Lanes table + session-level log
+- `architecture.md` -- target vault + code layout, 4-tier hedge fund role model, Multi-Machine Topology (Routines-Ready)
+- `skills-design.md` -- per-skill tier assignment + Routines-Ready Status
+- `agent-topology.md` -- monolithic + bear-case decision, full 2026 reasoning
+- `research-infrastructure.md` -- NBLM as MVP-gated first-class pillar
+- `nblm-mvp.md` -- 4-week NBLM experiment design, 5 exit criteria, Phase 2a placement
+- `open-questions.md` -- closed and open design decisions
+- `keith-checklist.md` -- Keith's action items (IBKR, tax, watchlist)
+- `milestones.md` -- per-phase testable checkpoints
+- `data-sources.md` -- APIs, MCP servers, feeds, tier selection
+- `broker-research.md` -- IBKR HK decision rationale + fact-check grilling
+- `execution-model.md` -- semi-auto paper trading contract, strategy approval flow
+- `risk-controls.md` -- code-enforced rules, circuit breakers, kill switch
+- `research-log.md` -- append-only findings log
+- `k2b-audit.md` + `k2b-audit-fixes-status.md` -- inheritance rationale (what K2Bi took from K2B, what got fixed pre-fork)
+- `feature_k2bi-phase1-scaffold.md` -- Phase 1 feature note with full audit trail
+- `index.md` -- planning workspace index + Resume Card
+- `project_k2bi.md` -- project hub note
 
-Going forward, operational knowledge lives in this repo (CLAUDE.md, DEVLOG.md, NEXT_SESSION.md) and in `~/Projects/K2Bi-Vault/wiki/`.
+Read [[planning/index]] first to orient. The Resume Card inside it tells you session state, next action, and priority read order.
+
+The original K2B-Vault archive at `~/Projects/K2B-Vault/wiki/projects/k2bi/` is frozen; K2Bi-Vault's copy at `~/Projects/K2Bi-Vault/wiki/planning/` is the live authoritative version going forward.
