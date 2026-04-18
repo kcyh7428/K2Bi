@@ -1,0 +1,39 @@
+# Pre-trade validator config.
+#
+# File-based; engine restart required to change. Claude cannot edit this
+# file mid-session (the invest-propose-limits skill drafts a delta to
+# review/strategy-approvals/ for Keith's explicit approval, then a
+# separate ship cycle lands the edit).
+#
+# All thresholds are Phase 2 MVP defaults. Tuned per Phase 3 burn-in
+# observations.
+
+position_size:
+  # Per-trade risk cap as fraction of portfolio NAV.
+  max_trade_risk_pct: 0.01  # 1% per trade per Ahern / research consensus
+  # Per-ticker concentration cap.
+  max_ticker_concentration_pct: 0.20  # 20%
+
+trade_risk:
+  # Portfolio-level risk ceiling summed across open + pending orders.
+  max_open_risk_pct: 0.05  # 5% of NAV at risk at any time
+
+leverage:
+  # MVP: cash-only. Engine refuses any margin use.
+  cash_only: true
+  max_leverage: 1.0
+
+market_hours:
+  # US Eastern. Engine reads broker server clock, not local.
+  regular_open: "09:30"
+  regular_close: "16:00"
+  # Extended-hours off by default for MVP.
+  allow_pre_market: false
+  allow_after_hours: false
+
+instrument_whitelist:
+  # Only tickers in this list can be traded. Empty = engine refuses all.
+  # Phase 2 starts with SPY (proof-of-pipeline). Additional tickers are
+  # added via invest-propose-limits + strategy approval flow.
+  symbols:
+    - SPY
