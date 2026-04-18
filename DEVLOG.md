@@ -4,6 +4,35 @@ Session-by-session ship log. Append-only. New entries on top.
 
 ---
 
+## 2026-04-18 -- Teach Mode Pedagogical Layer Applied (PR #2 merge + acceptance)
+
+**Commits:**
+- `f841d12` Merge pull request #2: Teach Mode pedagogical layer proposal
+- `3ec175a` proposal: Teach Mode -- pedagogical layer for K2Bi
+- `3ff7e10` chore: apply Teach Mode pedagogical layer (proposal 2026-04-18)
+
+**What shipped:** K2B architect session opened PR #2 with a 431-line pedagogical-layer proposal (`proposals/2026-04-18_teach-mode-pedagogical-layer.md`) in response to Keith's 2026-04-18 evening ask for plain-English explanation of trading terminology as he builds strategies. Proposal specifies four reinforcing layers plus a single-line `learning-stage:` dial. Design reviewed against the Memory Layer Ownership matrix (soft behavioral rule -> CLAUDE.md; dial -> active_rules.md; deep reference -> vault; output convention -> SKILL.md bodies; gate enforcement -> commit-msg hook). Strategy "How This Works (Plain English)" gate is permanent regardless of dial stage; the dial only tunes verbosity elsewhere. Merged to main, then applied acceptance instructions in a single follow-up commit. (1) `CLAUDE.md` gained a "Teach Mode (Pedagogical Layer)" section between Rules and AI vs Human Ideas, with a stage behavior table, glossary integration rules, and a dial-read bash one-liner. (2) `.claude/skills/invest-bear-case/SKILL.md` and `.claude/skills/invest-execute/SKILL.md` both gained a "Pedagogical layer (Teach Mode)" section with the dial read, footer convention, full worked example (NVDA bear case + SPY fill). (3) `.githooks/commit-msg` gained a Phase 2 milestone 2.17 TODO tag for the strategy approval gate (verify mandatory "How This Works" section is non-empty before allowing `status: approved`). (4) `K2Bi-Vault/wiki/reference/glossary.md` created with 14 seed terms (sharpe-ratio, sortino-ratio, drawdown, walk-forward-validation, look-ahead-bias, kill-switch, strategy-approval, bear-case, position-sizing, slippage, fee-erosion, decision-journal, regime, circuit-breaker, paper-trading) linked from `wiki/reference/index.md`. (5) `K2Bi-Vault/Templates/strategy.md` created with the mandatory "How This Works (Plain English)" section above YAML rules block; `Templates/index.md` seeded. (6) `active_rules.md` gained rule #6 "Pedagogical layer (learning-stage dial)" with `learning-stage: novice` default. (7) `wiki/log.md` appended via `scripts/wiki-log-append.sh`.
+
+**Codex review:** 1 finding, not in this ship's scope:
+- P2 — `scripts/deploy-to-mini.sh:60-62` auto-detect path does not scan for brand-new untracked `.claude/settings.json`, so first-time creation of that file would silently skip syncing. That file's changes predate this session (leftover dirty state from the Phase 2 scaffold ship); deliberately excluded from this commit and flagged for a follow-up ship.
+
+**Feature status change:** shipped as `--no-feature` (K2Bi has no `wiki/concepts/` lane structure yet; Phase 2 kickoff tracking lives in `wiki/planning/`).
+
+**Follow-ups:**
+- Address Codex P2 finding on `scripts/deploy-to-mini.sh` in a dedicated follow-up commit (pre-existing uncommitted work, not part of this ship).
+- Phase 2 milestone 2.17: wire the commit-msg hook's strategy approval gate (TODO tagged in `.githooks/commit-msg`). Implementation gates `status: approved` transitions on a non-empty "How This Works (Plain English)" section in `wiki/strategies/*.md`.
+- When `invest-feedback` skill wires the `/learn intermediate` shortcut, Keith can flip the dial without editing `active_rules.md` manually.
+- First auto-stub will appear in the glossary once an invest-* skill encounters a term not yet in the 14 seed list; `/invest-compile` fills stubs in batch.
+
+**Key decisions:**
+- Skipped Option C (`/explain` slash command) per the proposal's deferral reasoning: the auto-pedagogy in layers A/D/E covers 80% of comprehension moments; build the explicit explainer only if Keith finds himself reaching for one during burn-in.
+- Kept PR #2 as a merge commit (matches PR #1 pattern) so the proposal's standalone provenance remains in git history.
+- Numbered the new dial rule as active_rules rule #6, not #5 as the proposal suggested, since five rules already exist from Phase 1 scaffold. LRU cap of 12 still has headroom.
+- Fixed one drafting typo in the proposal's frontmatter example (`origin: k2b-generate` -> `origin: k2bi-generate`, matching the canonical three-value origin set).
+- Excluded pre-existing `scripts/deploy-to-mini.sh` dirty state from this commit per the /ship rule that files not touched in the current session must not be staged, even though Codex reviewed it alongside the session changes.
+
+---
+
 ## 2026-04-18 -- Phase 2 Scaffold Applied (PR #1 merge + acceptance)
 
 **Commits:**
