@@ -4,6 +4,33 @@ Session-by-session ship log. Append-only. New entries on top.
 
 ---
 
+## 2026-04-18 -- Phase 2 Bundle 2: order pipeline (m2.5, m2.6, m2.8)
+
+**Commit:** `530eb81` feat: Phase 2 Bundle 2 -- order pipeline (m2.5, m2.6, m2.8)
+
+**What shipped:** End-to-end order path on top of Bundle 1's safety primitives. IBKR connector wires ib_async bracket orders (parent LimitOrder + linked GTC StopOrder) so the broker itself holds the protective stop; lazy import keeps the package importable on hosts without ib_async; account-id scoping is required at construction time (K2Bi equivalent of Bundle 1's cash_only canonical helper). Engine main loop implements the 10-state machine from `wiki/planning/m2.6-engine-state-machine.md` (HALTED added post-R21 to distinguish refused-to-operate from graceful-exit SHUTDOWN). Recovery reconciles journal vs broker per architect Q3 contract: six catch-up cases classify cleanly, four discrepancy cases refuse startup unless `K2BI_ALLOW_RECOVERY_MISMATCH=1`; trade_id fallback matches crash-window orders when journal write was lost between submit and ack. Journal schema v2 adds 16 new event types + broker_order_id / broker_perm_id top-level fields; v1 records remain readable. Strategy loader splits into StrategyDocument (Bundle 3/4 consumers) + ApprovedStrategySnapshot (immutable runtime) per architect Q2-refined ruling; runner is pure evaluation. invest-execute skill replaces its stub with the real Claude wrapper (status / run / journal / kill-status).
+
+**Codex review:** 22 adversarial rounds (17 Codex + 2 MiniMax M2.7 cross-vendor during Codex quota gap at R15-R16). Every P1 fixed inline with regression tests; every P2 in Bundle 2 scope fixed; out-of-scope P2/P3 (MiniMax infra) left for Keith's separate feature commit. Architect's post-R21 completeness audit produced the 10-state transition matrix appended to `wiki/planning/m2.6-engine-state-machine.md`. R22 (ship gate) surfaced one P1 on duplicate-submit risk after transport failure -- fixed by forcing `_init_completed=False` so reconnect re-runs INIT instead of fast-tracking to CONNECTED_IDLE.
+
+**Feature status change:** Bundle 2 in phase-2-bundles.md moves to shipped. Phase 2 progress: Bundle 1 + Bundle 2 done (6 of 22 milestones: m2.3, m2.4, m2.5, m2.6, m2.7, m2.8). Bundle 3 (approval gate: m2.16, m2.17) unblocked next.
+
+**Follow-ups:**
+- Keith's MiniMax reviewer infra (scripts/lib/minimax_review.py, scripts/minimax-review.sh, invest-ship SKILL fallback docs, .gitignore + CLAUDE.md updates) is unstaged in this tree; lands in a separate commit under Keith's own feature workstream (two R22 out-of-scope findings -- schema validation + archive-dir path -- attach to that commit).
+- Tests: 207 unit tests pass locally. ib_async not installed in the test environment, so the live connector's broker-side behavior is covered by protocol-conformance tests against MockIBKRConnector; real IB Gateway smoke test for Bundle 2 should land alongside the first Phase 3 paper ticket.
+- Follow-up audit queued by architect post-R8: kill-semantics inconsistency across m2.6 spec + risk-controls.md + kill_switch.py (whether .killed blocks only new orders OR implies flattening). Not a Bundle 2 gap; current spec language stands.
+
+**Key decisions (divergent from original spec):**
+- State machine grew from 9 states to 10: added HALTED as a distinct refused-to-operate terminal. SHUTDOWN now reserved for graceful signal exit. Drives invest-execute status messaging distinction.
+- Strategy loader skip-on-draft-parse-failure + fail-loud-on-approved-intent via raw status-line peek. Architect ruled silent skip was too permissive in R12.
+- EOD cutoff is US/Eastern local (default "16:30"), not UTC, so DST transitions don't misfire the session-boundary sweep (Codex R11 P1).
+- IBKR account_id is a required keyword-only kwarg on the live connector. Missing it = TypeError at construction, not silent filter bypass. Architect post-R18 type-level-discipline ruling.
+- Recovery validates every journal_view field at a single seam (`_validate_journal_view`) instead of scattered per-field try/except blocks. Refuses resume on any corruption; broker's still-open order surfaces as phantom_open_order mismatch on next reconcile (architect Q3 contract + post-R19 whack-a-mole stop rule).
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+Co-Shipped-By: invest-ship
+
+---
+
 ## 2026-04-18 -- Phase 2 Bundle 1: safety + observability foundation (m2.3, m2.4, m2.7)
 
 **Commit:** `befc26b` feat: Phase 2 Bundle 1 -- safety + observability foundation (m2.3, m2.4, m2.7)
