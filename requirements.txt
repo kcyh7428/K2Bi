@@ -1,0 +1,14 @@
+# K2Bi Python runtime dependencies.
+#
+# Phase 2 MVP: stdlib + PyYAML only (validator config loader). The
+# heavier deps (ib_async for IBKR, pandas_market_calendars for the
+# real calendar, pandas/numpy for backtests) land with the milestones
+# that actually need them:
+#   - m2.5 IBKR connector               -> ib_async
+#   - m2.15 yfinance backtest           -> yfinance (and friends)
+#   - Phase 4 real calendar upgrade     -> pandas_market_calendars
+#
+# Keep this list minimal until a milestone pulls in a new import.
+
+PyYAML>=6.0
+exchange_calendars>=4.5

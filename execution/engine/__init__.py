@@ -1,3 +1,8 @@
+# cash-only invariant: Bundle 2 main.py (m2.6) MUST call through
+# execution.risk.cash_only.check_sell_covered before any sell order
+# reaches the connector. The validator runner already enforces this via
+# the leverage validator, but the engine's own pre-submit path is the
+# backstop -- never add a shortcut that skips validators for sells.
 """Engine main loop.
 
 Phase 2 scope: main.py -- read approved strategy from vault, evaluate
