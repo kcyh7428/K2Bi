@@ -4,6 +4,34 @@ Session-by-session ship log. Append-only. New entries on top.
 
 ---
 
+## 2026-04-18 -- Phase 2 Scaffold Applied (PR #1 merge + acceptance)
+
+**Commits:**
+- `51708fe` Merge PR #1: Phase 2 MVP scaffold revision proposal
+- `92df8cd` proposal: Phase 2 MVP scaffold revision (collapse 2a/2b/3, defer NBLM)
+- `fcf2049` chore: apply Phase 2 MVP scaffold revision (proposal 2026-04-18)
+
+**What shipped:** K2B architect session opened PR #1 with a 450-line architectural revision proposal (`proposals/2026-04-18_phase2-mvp-scaffold-revision.md`) per Keith's "MVP scaffold all components ready, paper-trade ASAP, harden by discovery" reframe. Reviewed against architecture/execution-model/risk-controls/agent-topology — no contradictions. All non-negotiables preserved (4-tier model, execution layer isolation, code-enforced validators, strategy-level approval, decision journal append-only, NBLM MVP-gated, Routines-Ready discipline for Analyst skills). Merged to main. Applied acceptance instructions: (1) 4 vault planning doc diffs to roadmap.md + milestones.md + nblm-mvp.md + planning/index.md replacing old Phase 2a/2b/3/4 sections with the new Phase 2 (22 MVP-scaffold milestones) + Phase 3 (6 first-paper-trade + burn-in) + Phase 4 (emergent, discovery-driven) structure. NBLM experiment re-tagged Phase 4 conditional. (2) Vault folders created: `raw/journal/` with JSONL schema contract in index.md; all other Phase 2 folders already existed from Phase 1 scaffold. (3) `execution/` Python module skeleton (`validators/`, `risk/`, `connectors/`, `engine/`, `journal/` with `__init__.py` placeholders + `validators/config.yaml` with top-5 validator defaults). (4) `pm2/ecosystem.config.js` with commented stub entries for invest-execute + invest-alert + invest-feed + invest-observer-loop (+ -open and -close edge-window companions for the engine). (5) 9 new skill stubs with tier assignment + Routines-Ready discipline: invest-thesis, invest-bear-case, invest-screen, invest-regime, invest-backtest (Analyst); invest-execute, invest-alert, invest-feed (Trader); invest-propose-limits (Portfolio Manager). Each SKILL.md is a spec-only stub keyed to its Phase 2 milestone. Skill count: 14 → 23.
+
+**Codex review:** 3 findings, all addressed inline:
+- P1 — pm2 engine cron `*/5 9-16 * * 1-5` fired outside the 09:30-16:00 ET window (09:00-09:25 pre-open, 16:05-16:55 post-close). Replaced with a 3-entry pattern: main `*/5 10-15 * * 1-5` plus `invest-execute-open` at `30-55/5 9 * * 1-5` plus `invest-execute-close` at `0 16 * * 1-5`. Documented the engine's `market_hours` validator as the hard enforcer; cron width is a perf concern, not a safety one.
+- P2 — invest-feed filename `YYYY-MM-DD_news_<slug>.md` could collide for same-day items with the same slug, overwriting the earlier item. Added `<hash8>` suffix (first 8 chars of `source-hash`) to guarantee uniqueness.
+- P2 — invest-feed's pm2 cron had the same pre-open / post-close issue; tightened to `*/30 10-15 * * 1-5` with the same -open / -close pattern as the engine.
+
+**Feature status change:** shipped as `--no-feature` (no K2Bi `wiki/concepts/` lane structure yet; Phase 2 kickoff tracking lives in `wiki/planning/`).
+
+**Follow-ups (Phase 2 build work, per-milestone):**
+- 22 Phase 2 milestones now tracked in [[milestones#Phase 2 -- MVP Scaffold All Tiers]]. Next session's first concrete task is milestone 2.3 (top-5 validator implementations + unit tests). 2.1 (vault folders) and 2.2 (Python scaffold) land in this commit.
+- Keith still owes: first strategy choice (milestone 3.1 -- SPY weekly rotation OR another single-ticker thesis).
+- Phase 2a prerequisites (accuracy-delta eval log, revealed-preference observer signal) are no longer pre-Phase-2 blockers; they re-emerge as Phase 4 triggers only if the NBLM experiment fires.
+
+**Key decisions:**
+- Kept PR #1 as a merge commit (not squash) so the proposal's standalone provenance remains in git history; the proposal file at `proposals/2026-04-18_phase2-mvp-scaffold-revision.md` is the canonical architectural revision artifact.
+- All 9 new skills are stub-only; implementation is Phase 2 build work, not this ship. Ships skill specs + tier assignment + Routines-Ready audit structure so Phase 2 build sessions can start immediately against a concrete milestone list.
+- `.claude/settings.json` was landed in the prior bootstrap commit (`597e052`); this ship inherits its Bash + MCP allowlist unchanged.
+
+---
+
 ## 2026-04-18 -- Bootstrap Fixes: Shared-Skill Rename + Helper Skills
 
 **Commit:** `597e052` feat: rename shared skills to invest-* and add bootstrap helpers
