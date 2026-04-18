@@ -14,6 +14,19 @@
 # is already enforced. The K2B repo trailer convention (Co-Shipped-By:
 # k2b-ship) is also accepted because /ship is reused cross-repo until an
 # invest-ship variant exists.
+#
+# TODO (Phase 2 milestone 2.17, strategy approval gate): when a commit
+# touches K2Bi-Vault/wiki/strategies/*.md AND flips any `status:` line
+# to `status: approved`, this hook must also verify that the "How This
+# Works (Plain English)" section exists and is non-empty (not the
+# template placeholder). This is the code-enforced half of the Teach
+# Mode pedagogical layer (Teach Mode gate is permanent regardless of
+# learning-stage dial). Implementation: grep the staged file for
+# "## How This Works (Plain English)" followed by at least one line
+# that is not whitespace, not a [bracketed] placeholder, and not the
+# template's MANDATORY-marker stub. Reject the commit if the section
+# is missing or placeholder-only. Proposal reference:
+# proposals/2026-04-18_teach-mode-pedagogical-layer.md (section D).
 
 set -euo pipefail
 MSG_FILE="$1"

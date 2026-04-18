@@ -107,6 +107,51 @@ Day-one consequences:
 - Apply relevant learnings from `self_improve_learnings.md` to your behavior each session.
 - After modifying project files (skills, CLAUDE.md, code, scripts, validators), run `/ship`. The K2B `.pending-sync/` mailbox pattern carries over.
 
+## Teach Mode (Pedagogical Layer)
+
+Keith is learning trading concepts as he builds K2Bi. Every invest-* skill that outputs trading-specific content must apply the pedagogical layer per the active `learning-stage:` setting.
+
+### Behavior by stage
+
+The dial lives at `K2Bi-Vault/System/memory/active_rules.md` as a single line: `learning-stage: novice|intermediate|advanced`. Default is `novice`. Skills read it at start of each invocation.
+
+| Stage | Plain-English preamble | Glossary `[[term]]` links | "Why this matters" decision footer | Strategy "How This Works" section |
+|-------|------------------------|--------------------------|------------------------------------|-----------------------------------|
+| `novice` (default) | yes -- 2-3 sentences before any technical output | yes -- first occurrence per output | yes -- on every bear-case + execute output | yes -- mandatory, blocks approval if missing |
+| `intermediate` | dropped on routine outputs; kept on first-time concepts | yes | yes -- on bear-case + execute | yes -- mandatory, blocks approval if missing |
+| `advanced` | off | yes | off | yes -- mandatory, blocks approval if missing (this discipline is permanent) |
+
+The "How This Works" section on strategy specs is **never optional regardless of stage** -- it is the primary input to strategy approval. If you cannot understand WHY a strategy works in plain English, you cannot approve it for real money.
+
+### Glossary integration
+
+The living glossary lives at `K2Bi-Vault/wiki/reference/glossary.md`. When a skill emits a trading term that has a glossary entry, the first occurrence in that output renders as `[[glossary#term-name]]` (Obsidian wiki-link to the section heading). When a skill uses a term not yet in the glossary, it MUST append a stub at the bottom of the glossary file in the same skill run:
+
+```
+## new-term-name
+
+_definition pending -- added by invest-thesis 2026-04-19_
+```
+
+The next `/invest-compile` run fills out pending stubs. Keith can also fill them manually in 30 seconds in Obsidian. Stubs are visible signals that the glossary is one beat behind reality.
+
+### Reading the dial
+
+Bash one-liner skills can use:
+
+```bash
+LEARNING_STAGE=$(grep -E '^learning-stage:' ~/Projects/K2Bi-Vault/System/memory/active_rules.md 2>/dev/null | sed 's/learning-stage: *//' | tr -d '[:space:]')
+LEARNING_STAGE=${LEARNING_STAGE:-novice}
+```
+
+If the field is missing, default to `novice`. Skills should never fail because the dial is unset.
+
+### What this is NOT
+
+- Not a tutorial system. The pedagogical layer is in-flow only -- explanations live next to the actions they describe.
+- Not a replacement for the glossary. A/D/E surface explanations at the moment of use; the glossary is the deep reference Keith can search later.
+- Not optional verbosity Keith can ignore. The strategy "How This Works" gate is enforced by `/invest-ship` (commit-msg hook), not just by convention.
+
 ## AI vs Human Ideas
 
 - K2Bi captures, organizes, and analyzes. K2Bi does NOT propose trades or strategies on Keith's behalf without explicit ask.
