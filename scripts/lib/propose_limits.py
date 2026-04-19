@@ -1744,8 +1744,18 @@ def _atomic_write(path: Path, data: bytes, *, exclusive: bool = False) -> None:
             # links (FAT32 USB drives, some network mounts), os.link
             # raises OSError with errno EXDEV/EPERM/ENOTSUP. K2Bi's
             # MacBook + Mac Mini both run APFS so this branch is
-            # defensive; falling through to os.replace + a pre-check
-            # loses the TOCTOU guarantee but beats a cryptic crash.
+            # defensive.
+            #
+            # R7 pair-2 F1 (HIGH, verified): the pre-existing fallback did
+            # `if path.exists(): raise FileExistsError; else: os.replace(...)`.
+            # Between the path.exists() check and the os.replace() call a
+            # concurrent writer on the same (non-APFS) filesystem could
+            # create `path`, so os.replace would silently overwrite a peer's
+            # file instead of surfacing the collision. Exclusive-create is
+            # simply not expressible on these filesystems, so fail hard with
+            # a clear message rather than silently downgrade: Keith gets a
+            # loud error and switches to a local APFS workdir, instead of
+            # losing a peer's proposal to a silent race.
             import errno as _errno
 
             try:
@@ -1760,13 +1770,13 @@ def _atomic_write(path: Path, data: bytes, *, exclusive: bool = False) -> None:
                     _errno.ENOTSUP,
                     _errno.EOPNOTSUPP,
                 ):
-                    if path.exists():
-                        raise FileExistsError(
-                            f"[Errno {_errno.EEXIST}] File exists: {path}"
-                        ) from link_exc
-                    os.replace(tmp, path)
-                else:
-                    raise
+                    raise ProposalError(
+                        f"exclusive-create not supported on this filesystem "
+                        f"(os.link {link_exc}); K2Bi's atomicity guarantee "
+                        f"for {path} requires APFS. Run from a local APFS "
+                        f"workdir."
+                    ) from link_exc
+                raise
         else:
             os.replace(tmp, path)
     except Exception:
