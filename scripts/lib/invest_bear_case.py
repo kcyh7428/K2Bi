@@ -755,23 +755,34 @@ def run_bear_case(
     # overwrite BOTH fields -- but also assert the file is currently
     # internally consistent BEFORE the rewrite so a stale inconsistency
     # surfaces here rather than staying hidden in a partial-update path.
-    existing_verdict = existing_fm.get("bear_verdict")
-    existing_conviction = existing_fm.get("bear_conviction")
-    if existing_verdict is not None and existing_conviction is not None:
-        if (
-            isinstance(existing_conviction, int)
-            and 0 <= existing_conviction <= 100
-        ):
-            expected_existing_verdict = derive_verdict(existing_conviction)
-            if existing_verdict != expected_existing_verdict:
-                raise ValueError(
-                    f"{ticker_path} has inconsistent pre-existing "
-                    f"bear-case state: bear_verdict={existing_verdict!r} "
-                    f"but bear_conviction={existing_conviction} implies "
-                    f"{expected_existing_verdict!r}. Run with refresh=True "
-                    f"(or /invest bear-case {symbol} --refresh) to rewrite "
-                    f"cleanly after confirming the intended verdict."
-                )
+    #
+    # R2-bundle-4a-sweep (cumulative Codex, 2026-04-20): the check is
+    # gated behind `refresh is False` so the sanctioned recovery path
+    # works. Without this, the error message ("Run with refresh=True to
+    # rewrite cleanly") pointed at a dead branch -- refresh requests
+    # still hit this raise and approval stayed blocked until manual
+    # frontmatter surgery. refresh=True is the operator's explicit
+    # acknowledgment that the file is in a repair-worthy state; the
+    # approval scanner stays strict so any leftover inconsistency is
+    # caught at the gate, not here.
+    if not refresh:
+        existing_verdict = existing_fm.get("bear_verdict")
+        existing_conviction = existing_fm.get("bear_conviction")
+        if existing_verdict is not None and existing_conviction is not None:
+            if (
+                isinstance(existing_conviction, int)
+                and 0 <= existing_conviction <= 100
+            ):
+                expected_existing_verdict = derive_verdict(existing_conviction)
+                if existing_verdict != expected_existing_verdict:
+                    raise ValueError(
+                        f"{ticker_path} has inconsistent pre-existing "
+                        f"bear-case state: bear_verdict={existing_verdict!r} "
+                        f"but bear_conviction={existing_conviction} implies "
+                        f"{expected_existing_verdict!r}. Run with refresh=True "
+                        f"(or /invest bear-case {symbol} --refresh) to rewrite "
+                        f"cleanly after confirming the intended verdict."
+                    )
 
     try:
         content_after_fm = _merge_frontmatter_bear_fields_inplace(

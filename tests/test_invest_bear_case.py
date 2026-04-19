@@ -924,6 +924,35 @@ class WriteTimeConsistencyCheckTests(_VaultTestBase):
         self.assertTrue(result.written)
         self.assertEqual(result.bear_verdict, "VETO")
 
+    def test_refresh_repairs_inconsistent_existing_state(self) -> None:
+        # R2-bundle-4a-sweep (cumulative Codex): the error message on
+        # the consistency check tells the operator to rerun with
+        # refresh=True, but the check previously fired unconditionally
+        # -- refresh requests still hit the raise and approval stayed
+        # blocked until manual frontmatter surgery. The sanctioned
+        # recovery path must actually repair the inconsistent state.
+        _seed_thesis(
+            self.tmp_vault, "NVDA",
+            with_bear_fields=True, bear_days_old=45,
+            # conviction=85 implies VETO but verdict says PROCEED.
+            bear_conviction=85, bear_verdict="PROCEED",
+        )
+        # Without refresh: raises (test above covers this). With
+        # refresh=True: the writer overwrites both fields cleanly.
+        result = ibc.run_bear_case(
+            "NVDA", _default_input(conviction=50),
+            self.tmp_vault, now=self.today, refresh=True,
+        )
+        self.assertTrue(result.written)
+        # Rewrite lands the CONSISTENT new state derived from the
+        # supplied conviction, not the tampered-existing state.
+        self.assertEqual(result.bear_verdict, "PROCEED")  # 50 -> PROCEED
+        self.assertEqual(result.bear_conviction, 50)
+        # On-disk frontmatter matches.
+        fm = sf.parse((self.tmp_vault / "wiki/tickers/NVDA.md").read_bytes())
+        self.assertEqual(fm["bear_verdict"], "PROCEED")
+        self.assertEqual(fm["bear_conviction"], 50)
+
 
 class MultipleDatedSectionsTests(_VaultTestBase):
     """Refresh-triggered re-run keeps prior ## Bear Case (OLD_DATE) sections.
