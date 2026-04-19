@@ -4,6 +4,25 @@ Session-by-session ship log. Append-only. New entries on top.
 
 ---
 
+## 2026-04-19 -- Fork-hygiene tightening + audit guard finishing pass
+
+**Commit:** `e8e8e61` chore(fork-hygiene): tighten audit guard + finish K2B->K2Bi org swap
+
+**What shipped:** Follow-up to `59b454b` which landed the audit script + initial allowlist + the line-475 invest-ship K2B path fix + the step 0b wiring. This pass closes the residual loose ends. CLAUDE.md gets the kcyh7428 → kcstudio GitHub-org swap (the last fork-time URL drift). `scripts/audit-fork-drift.sh` gains a belt-and-braces `($|[^i])` on the GitHub-remote regex so end-of-string K2B refs match. `scripts/fork-audit-allowlist.txt` swaps three whole-file allowlists (invest-research, invest-scheduler, invest-weave) for line-specific substrings -- whole-file would silently suppress every future K2B reference added to those files. The risky single global `~/Projects/K2B/scripts/` substring becomes seven specific helper-script paths so the cross-file false-suppress radius shrinks. A scoping-limitation header note documents the remaining `grep -vFf` global-substring caveat. `.claude/skills/invest-ship/SKILL.md` step 0b's idempotency claim gets qualified -- "no working-tree changes AND no allowlist edits" prints clean, not just "no changes".
+
+**Codex review:** R1 returned 2 P2 findings, both on allowlist scoping. Both addressed inline (per-helper-path tightening + scoping-limitation header). MiniMax R1 surfaced 4 findings -- F1 (regex misread, addressed via `($|[^i])` belt-and-braces), F2 (whole-file allowlist defeat, addressed via per-line refactor), F3 (multi-line YAML coverage gap, rejected as out of scope -- audit targets the documented Python-literal hardcoded-set bug), F4 (idempotency claim, addressed via SKILL.md prose). MiniMax R2 raised 3 hallucinated findings claiming `/k2b-scheduler|weave|research` slash invocations exist in the bridge skills; verified no such invocations via grep, all rejected. P0 stop-rule (Codex R3 same surface) not triggered.
+
+**Feature status change:** none -- this was `--no-feature` infra hygiene, not a feature ship. The audit guard now lives in `scripts/audit-fork-drift.sh` and is wired as `/invest-ship` step 0b advisory.
+
+**Follow-ups:** none. Audit clean (0 hits given allowlist), 13 allowlist substrings spanning 8 categories, full suite still green at 418 passing.
+
+**Key decisions:** Accepted Codex P2 cross-file false-suppress radius as a documented limitation rather than refactoring the audit to support per-file allowlist sections. Trade-off rationale recorded inline in `scripts/fork-audit-allowlist.txt`. A future audit-script upgrade can carry per-file sections; the fgrep-based contract is the architect's current shape.
+
+Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>
+Co-Shipped-By: invest-ship
+
+---
+
 ## 2026-04-19 -- MiniMax scope Phase B port + invest-ship wiring
 
 **Commits:**
