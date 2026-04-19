@@ -51,7 +51,9 @@ from __future__ import annotations
 
 import argparse
 import datetime as _dt
+import os
 import sys
+import tempfile
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -89,6 +91,110 @@ RETIRE_ADDED_FIELDS = frozenset({"retired_at", "retired_reason"})
 
 
 STRATEGY_FILENAME_PREFIX = "strategy_"
+
+
+def atomic_write_bytes(path: Path, content: bytes) -> None:
+    """Write `content` to `path` atomically via tempfile + os.replace.
+
+    The tempfile lives in the same directory as `path` so `os.replace`
+    stays on one filesystem. `f.flush()` + `os.fsync()` before replace
+    guarantees the bytes hit disk before the rename swaps the inode;
+    readers therefore never see a partial file even if the process is
+    killed between fsync and replace (the final file keeps its prior
+    content, and the temp is orphaned for janitor cleanup).
+
+    Any exception raised during write / replace unlinks the tempfile
+    before re-raising, so callers that retry on failure do not leak
+    dot-prefixed temps into the target directory. `FileNotFoundError`
+    on the unlink is swallowed (some failure modes leave no tempfile).
+
+    Refuses to write through a symlink at `path`. POSIX rename(2)
+    semantics mean `os.replace` on a symlinked `path` replaces the
+    symlink itself (not the target), so the attack surface is minimal
+    on Linux/macOS -- but defence-in-depth for future portability to
+    non-standard filesystems (NFS / container overlays with differing
+    symlink semantics) + easy to reason about for reviewers. The
+    refusal is a ValueError so callers can surface a clear message.
+
+    Parent directories are created on demand; callers do not need to
+    mkdir upfront. Shared by Bundle 3 cycle 5 (`invest_ship_strategy`
+    uses a private mirror of this helper -- same pattern, not yet
+    refactored to import this one) and Bundle 4 cycle 1 onward
+    (`invest_thesis`, `invest_backtest`, future Analyst-tier writers).
+    """
+    if path.is_symlink():
+        raise ValueError(
+            f"refusing to write through symlink at {path!s}; "
+            f"resolve or remove the symlink first"
+        )
+    parent = path.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.tmp.",
+        dir=str(parent),
+    )
+    tmp_path = Path(tmp_name)
+    # `fd` is initially owned by this frame. Once `os.fdopen(fd, "wb")`
+    # succeeds and the `with` block enters, the file object owns the
+    # fd and its __exit__ will close it. We track the handoff with
+    # `fd_owned` so the except path closes fd iff fdopen raised before
+    # ownership transferred (Bundle 4 R5 HIGH #2). Swallowing EBADF on
+    # a double-close would also work, but explicit state is cleaner
+    # and lets a reviewer see the invariant at a glance.
+    fd_owned = True
+    try:
+        with os.fdopen(fd, "wb") as f:
+            fd_owned = False
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        if fd_owned:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def has_section(body: str, heading: str) -> bool:
+    """Return True if `body` contains a top-level `## <heading>` section.
+
+    Matching is case-insensitive on the heading text. To avoid
+    prefix-collisions (`## Backtest Overrides Pending` matching
+    `heading="Backtest Override"`), suffix characters are restricted:
+    an exact match, a match followed by whitespace, or a match
+    followed by an opening paren all count (so
+    `## Backtest Override (2026-04-19)` still matches). A match
+    followed by any other non-word character would also be safe but
+    the two-allowed-suffixes rule covers every shape we've authored
+    and keeps the function narrow. Closes Codex R7 R2 #3.
+
+    Used by the Bundle 4 cycle 5 `/invest-ship --approve-strategy`
+    backtest-gate override check + by `invest_thesis` for idempotent
+    heading probes.
+    """
+    target = heading.strip().lower()
+    target_sp = target + " "
+    target_paren = target + "("
+    for line in body.splitlines():
+        # Require the heading at column 0 -- an indented `    ## foo`
+        # is a code-block line, not a real section. Prior behavior
+        # stripped leading whitespace first and would be satisfied by
+        # a pasted snippet in fenced code. Closes Codex R7 R4 #2.
+        if not line.startswith("## "):
+            continue
+        rest = line[3:].strip().lower()
+        if rest == target:
+            return True
+        if rest.startswith(target_sp) or rest.startswith(target_paren):
+            return True
+    return False
 
 
 def derive_retire_slug(source_path: str) -> str:

@@ -752,5 +752,156 @@ class CLITests(unittest.TestCase):
             self.assertEqual(result.stdout.decode().strip(), "approved\tproposed")
 
 
+class AtomicWriteTests(unittest.TestCase):
+    """Covers `atomic_write_bytes` -- shared Bundle 4+ helper for any
+    analyst-tier skill writing to the vault."""
+
+    def setUp(self) -> None:
+        self.tmp = Path(tempfile.mkdtemp(prefix="atomic_write_"))
+
+    def tearDown(self) -> None:
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_round_trip_write_then_read(self) -> None:
+        target = self.tmp / "sub" / "file.md"  # sub-dir auto-created
+        sf.atomic_write_bytes(target, b"hello\n")
+        self.assertEqual(target.read_bytes(), b"hello\n")
+
+    def test_replaces_existing_file(self) -> None:
+        target = self.tmp / "file.md"
+        target.write_bytes(b"first\n")
+        sf.atomic_write_bytes(target, b"second\n")
+        self.assertEqual(target.read_bytes(), b"second\n")
+
+    def test_refuses_symlink_target(self) -> None:
+        """Bundle 4 R3 HIGH #1: explicit symlink refusal is defence-in-
+        depth on top of POSIX rename(2)'s already-safe semantics."""
+        decoy = self.tmp / "decoy.txt"
+        decoy.write_text("DECOY\n")
+        link = self.tmp / "link.md"
+        link.symlink_to(decoy)
+        with self.assertRaises(ValueError) as cm:
+            sf.atomic_write_bytes(link, b"would clobber decoy\n")
+        self.assertIn("symlink", str(cm.exception).lower())
+        # Decoy untouched
+        self.assertEqual(decoy.read_text(), "DECOY\n")
+
+    def test_cleans_up_tempfile_on_error(self) -> None:
+        import os as _os
+        import unittest.mock as _mock
+        target = self.tmp / "file.md"
+        target.write_bytes(b"original\n")
+        with _mock.patch(
+            "scripts.lib.strategy_frontmatter.os.replace",
+            side_effect=RuntimeError("boom"),
+        ):
+            with self.assertRaises(RuntimeError):
+                sf.atomic_write_bytes(target, b"new\n")
+        # Target retains original content
+        self.assertEqual(target.read_bytes(), b"original\n")
+        # No leftover tempfiles in the directory
+        siblings = [p.name for p in self.tmp.iterdir()]
+        self.assertEqual(
+            [p for p in siblings if p.startswith(".file.md.tmp.")],
+            [],
+            f"tempfile leaked: {siblings}",
+        )
+
+    def test_fdopen_failure_closes_fd_and_cleans_tempfile(self) -> None:
+        """R5 HIGH #2: when os.fdopen raises before ownership transfer,
+        the raw fd must be closed (no FD leak) AND the tempfile must
+        be unlinked.
+
+        We simulate the fdopen failure by patching and capture the fd
+        that mkstemp produced so we can assert it was closed (os.fstat
+        on a closed fd raises OSError).
+        """
+        import os as _os
+        import unittest.mock as _mock
+        target = self.tmp / "file.md"
+        captured_fd: list[int] = []
+
+        real_mkstemp = tempfile.mkstemp
+
+        def _recording_mkstemp(*args, **kwargs):
+            fd, name = real_mkstemp(*args, **kwargs)
+            captured_fd.append(fd)
+            return fd, name
+
+        with _mock.patch(
+            "scripts.lib.strategy_frontmatter.tempfile.mkstemp",
+            side_effect=_recording_mkstemp,
+        ), _mock.patch(
+            "scripts.lib.strategy_frontmatter.os.fdopen",
+            side_effect=ValueError("simulated fdopen failure"),
+        ):
+            with self.assertRaises(ValueError):
+                sf.atomic_write_bytes(target, b"content\n")
+
+        # Exactly one fd was captured + it is now closed
+        self.assertEqual(len(captured_fd), 1)
+        with self.assertRaises(OSError):
+            _os.fstat(captured_fd[0])
+        # No leftover tempfiles in the directory
+        siblings = [p.name for p in self.tmp.iterdir()]
+        self.assertEqual(
+            [p for p in siblings if p.startswith(".file.md.tmp.")],
+            [],
+            f"tempfile leaked: {siblings}",
+        )
+
+
+class HasSectionTests(unittest.TestCase):
+    """Covers `has_section` -- Bundle 4 cycle 5 will consume this for
+    the /invest-ship --approve-strategy backtest-override check.
+    Invest-thesis cycle 1 authors the helper + proves the shape here."""
+
+    def test_exact_match(self) -> None:
+        body = "# Title\n\n## How This Works\n\nBody text\n"
+        self.assertTrue(sf.has_section(body, "How This Works"))
+
+    def test_missing_section_returns_false(self) -> None:
+        body = "# Title\n\nno section here\n"
+        self.assertFalse(sf.has_section(body, "How This Works"))
+
+    def test_case_insensitive(self) -> None:
+        body = "## how this works\n\nbody\n"
+        self.assertTrue(sf.has_section(body, "How This Works"))
+
+    def test_matches_parenthetical_suffix(self) -> None:
+        body = "## Backtest Override (2026-04-19)\n\nreason\n"
+        self.assertTrue(sf.has_section(body, "Backtest Override"))
+
+    def test_matches_whitespace_suffix(self) -> None:
+        body = "## Backtest Override last ran today\n\nreason\n"
+        self.assertTrue(sf.has_section(body, "Backtest Override"))
+
+    def test_does_not_prefix_match_unrelated_heading(self) -> None:
+        """Codex R7 R2 #3: `## Backtest Overrides Pending` must NOT
+        match `Backtest Override`. The suffix allow-list is limited to
+        whitespace + open-paren so only the semantically-same heading
+        matches."""
+        body = "## Backtest Overrides Pending\n\nreason\n"
+        self.assertFalse(sf.has_section(body, "Backtest Override"))
+
+    def test_does_not_match_h3_subheadings(self) -> None:
+        body = "### How This Works\n\nsub-section only\n"
+        self.assertFalse(sf.has_section(body, "How This Works"))
+
+    def test_does_not_match_indented_code_block(self) -> None:
+        """Codex R7 R4 #2: a `## heading` inside an indented code block
+        (or a fenced code block) is not a real section. The helper must
+        require column-0 placement to avoid false positives from pasted
+        examples."""
+        body = (
+            "# Title\n\n"
+            "Example snippet:\n\n"
+            "    ## How This Works\n"
+            "    body text inside a 4-space code block\n"
+        )
+        self.assertFalse(sf.has_section(body, "How This Works"))
+
+
 if __name__ == "__main__":
     unittest.main()
