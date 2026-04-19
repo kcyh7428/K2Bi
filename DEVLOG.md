@@ -322,3 +322,24 @@ One out-of-scope finding in Pass 4 (P2 on `CLAUDE.md:153` — strategy-gate enfo
 **Resume handle:** Keith says "continue k2b investment" in any new session -> CLAUDE.md routes to `K2B-Vault/wiki/projects/k2bi/index.md` Resume Card -> next action is now "Phase 1 Session 2: port 7 skills + run eval harness + `/ship` smoke test".
 
 **Next action:** Phase 1 Session 2 (when Keith picks it up). Port skills, run evals, ship.
+
+
+## 2026-04-19 -- Bundle 3 cycle 4 ships: hook extensions enforce approval discipline
+
+**Commit:** `148509a` feat(hooks): enforce strategy + config approval discipline via pre-commit + commit-msg + post-commit
+
+**What shipped:** Bundle 3 cycle 4 ships the three-hook enforcement layer (pre-commit Checks A/B/C/D + commit-msg transition-trailer matrix + NEW post-commit sentinel landing) that prevents any path outside `/invest-ship` from advancing a strategy status or editing `execution/validators/config.yaml`. All three hooks share a single `scripts/lib/strategy_frontmatter.py` parser so YAML quirks (NFC vs NFD, quoted vs unquoted scalars, unquoted vs ISO-string datetimes) do not false-flag Check D on otherwise-legal retires. Post-commit honours `engine.retired_dir` / `engine.kill_path` from `config.yaml` so the hook's write path and the engine's read path never diverge when a deployment customises either. Prep: `STATUS_REJECTED` added to `execution/strategies/types.py::ALLOWED_STATUSES` (Bundle 2 gap per spec §9.2). Full test suite: 393 passing (102 new across `tests/test_strategy_frontmatter.py`, `tests/test_pre_commit_hook.py`, `tests/test_commit_msg_hook.py`, `tests/test_post_commit_hook.py`, plus 2 loader regressions).
+
+**Codex review:** skipped on `/ship` with reason `codex-final-gate-passed-cycle4-R1-P0-fixed-R2-test-quality-addressed`; Codex R1 + R2 ran interactively during the cycle. R1 flagged a P0 (`_resolve_retired_dir` ignored `config.yaml`); fixed + regression-tested. R2 flagged a weak parity test (tested the shared resolver only, not the hook's compound logic); upgraded to import the hook module and call `_resolve_retired_dir()` directly across 5 branches. MiniMax R1-R5 converged (approved). All P1 findings addressed. Deferred: F4 Check C content-min (belongs to `/invest-ship --approve-limits` cycle 6), F5 symlinks (unsupported config), F6 CRLF (strict byte policy is intentional), F8 fallback failure marker (spec §4.3 matches impl), F9 error-message hint polish.
+
+**Feature status change:** no feature note (K2Bi has no `wiki/concepts/` lane yet; Bundle 3 cycles ship as standalone commits per prior pattern -- cycles 2 + 3 followed the same shape).
+
+**Follow-ups:**
+- Cycle 5: `/invest-ship --approve-strategy`, `--reject-strategy`, `--retire-strategy`, `--diagnose-approved` subcommands (share the new helper's `retire-slug` + `check-approved-immutable` CLI).
+- Cycle 6: `invest-propose-limits` MVP + `/invest-ship --approve-limits` wiring (consume the proposed->approved transition Check C now polices).
+- Cycle 7: §8.5 end-to-end test (`tests/test_bundle_3_e2e.py`, gated behind `K2BI_RUN_IBKR_TESTS=1`).
+
+**Key decisions (cycle-level):**
+- Post-commit hook written in Python (not bash) so it can import `execution.risk.kill_switch.write_retired` + `execution.engine.main.derive_retire_slug` directly; bash + python shell-out would duplicate the slug derivation and re-open the parity gap R11 flagged in cycle 3.
+- `_nfc()` does more than NFC -- it also `str()`-coerces YAML scalars and `isoformat()`-canonicalises datetimes. The expanded contract closes 3 reviewer-reported false-positive classes (float vs quoted string, int vs quoted int, unquoted datetime vs quoted ISO string) without loosening the safety-critical equality check on actually-different values.
+- Override env usage is now logged to `wiki/log.md` via the single-writer helper in addition to stderr. Git does not capture stderr into the commit object, so stderr-only audit left no durable record; the new best-effort log call does.
