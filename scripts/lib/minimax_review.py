@@ -34,9 +34,9 @@ MAX_FILE_BYTES = 256 * 1024  # skip large files; M2.7 has 200K context but stay 
 BINARY_SNIFF_BYTES = 4096
 
 
-def run_git(*args: str) -> str:
+def run_git(*args: str, cwd: Path | None = None) -> str:
     return subprocess.check_output(
-        ["git", *args], cwd=REPO_ROOT, text=True, errors="replace"
+        ["git", *args], cwd=cwd or REPO_ROOT, text=True, errors="replace"
     )
 
 
@@ -50,7 +50,9 @@ def is_binary(path: Path) -> bool:
     return False
 
 
-def gather_working_tree_context() -> tuple[str, list[str]]:
+def gather_working_tree_context(
+    repo_root: Path | None = None,
+) -> tuple[str, list[str]]:
     """Return (context_text, changed_file_list) for working-tree scope.
 
     Includes:
@@ -59,7 +61,8 @@ def gather_working_tree_context() -> tuple[str, list[str]]:
       - diff vs HEAD for tracked changes
       - full content of each changed/untracked file (truncated if huge)
     """
-    status = run_git("status", "--short")
+    root = repo_root or REPO_ROOT
+    status = run_git("status", "--short", cwd=root)
     changed_files: list[str] = []
     for line in status.splitlines():
         if not line.strip():
@@ -73,8 +76,8 @@ def gather_working_tree_context() -> tuple[str, list[str]]:
     if not changed_files:
         return "", []
 
-    diffstat = run_git("diff", "HEAD", "--stat")
-    diff = run_git("diff", "HEAD")
+    diffstat = run_git("diff", "HEAD", "--stat", cwd=root)
+    diff = run_git("diff", "HEAD", cwd=root)
 
     sections: list[str] = []
     sections.append("## git status --short\n```\n" + status.rstrip() + "\n```")
@@ -85,7 +88,7 @@ def gather_working_tree_context() -> tuple[str, list[str]]:
 
     sections.append("## Full file contents (changed and untracked)")
     for rel in sorted(set(changed_files)):
-        path = REPO_ROOT / rel
+        path = root / rel
         if not path.exists():
             sections.append(f"### {rel}\n_(deleted)_")
             continue
@@ -116,7 +119,283 @@ def gather_working_tree_context() -> tuple[str, list[str]]:
             f"### {rel}{truncated_note}\n```\n{numbered}\n```"
         )
 
-    return "\n\n".join(sections), changed_files
+    return "\n\n".join(sections), sorted(set(changed_files))
+
+
+def gather_diff_scoped_context(
+    files: list[str],
+    repo_root: Path | None = None,
+) -> tuple[str, list[str]]:
+    """Return (context_text, file_list) restricted to the given files.
+
+    Includes per-file `git diff HEAD <file>` and per-file `git status -- <file>`,
+    plus full content of each file. Other dirty files in the working tree
+    are NOT included -- this is the "review only what I asked for" gatherer.
+    """
+    root = repo_root or REPO_ROOT
+    if not files:
+        return "", []
+    files_sorted = sorted(set(files))
+    sections: list[str] = []
+    sections.append("## diff-scoped review (explicit file list)")
+    for rel in files_sorted:
+        path = root / rel if not Path(rel).is_absolute() else Path(rel)
+        try:
+            status = run_git("status", "--short", "--", rel, cwd=root).rstrip()
+        except subprocess.CalledProcessError:
+            status = ""
+        try:
+            diff = run_git("diff", "HEAD", "--", rel, cwd=root).rstrip()
+        except subprocess.CalledProcessError:
+            diff = ""
+        sections.append(f"### {rel}")
+        if status:
+            sections.append("```\n" + status + "\n```")
+        else:
+            sections.append("_(no working-tree change vs HEAD)_")
+        if diff:
+            sections.append("```diff\n" + diff + "\n```")
+        if not path.exists():
+            sections.append("_(file missing from working tree)_")
+            continue
+        if path.is_dir():
+            sections.append("_(directory, skipped)_")
+            continue
+        if is_binary(path):
+            sections.append("_(binary, skipped)_")
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError as e:
+            sections.append(f"_(unreadable: {e})_")
+            continue
+        truncated_note = ""
+        if len(data) > MAX_FILE_BYTES:
+            data = data[:MAX_FILE_BYTES]
+            truncated_note = f"\n_(truncated to {MAX_FILE_BYTES} bytes)_"
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = data.decode("utf-8", errors="replace")
+        numbered = "\n".join(
+            f"{i + 1:5d}  {line}" for i, line in enumerate(text.splitlines())
+        )
+        sections.append(f"```\n{numbered}\n```{truncated_note}")
+    return "\n\n".join(sections), files_sorted
+
+
+def gather_file_list_context(
+    paths: list[str],
+    repo_root: Path | None = None,
+) -> tuple[str, list[str]]:
+    """Return (context_text, file_list) for an explicit list of file paths.
+
+    No git context. Missing files and directories are skipped with a
+    stderr warning -- never crash. Useful for ad-hoc "review these files"
+    runs not tied to a diff or a plan.
+    """
+    root = repo_root or REPO_ROOT
+    if not paths:
+        return "", []
+    sections: list[str] = []
+    sections.append("## file-list review (no git context)")
+    included: list[str] = []
+    for rel in paths:
+        path = (root / rel) if not Path(rel).is_absolute() else Path(rel)
+        if not path.exists():
+            print(
+                f"[minimax-review] warning: skipping missing file: {rel}",
+                file=sys.stderr,
+            )
+            continue
+        if path.is_dir():
+            print(
+                f"[minimax-review] warning: skipping directory: {rel}",
+                file=sys.stderr,
+            )
+            continue
+        if is_binary(path):
+            sections.append(f"### {rel}\n_(binary, skipped)_")
+            included.append(rel)
+            continue
+        try:
+            data = path.read_bytes()
+        except OSError as e:
+            sections.append(f"### {rel}\n_(unreadable: {e})_")
+            continue
+        truncated_note = ""
+        if len(data) > MAX_FILE_BYTES:
+            data = data[:MAX_FILE_BYTES]
+            truncated_note = f"\n_(truncated to {MAX_FILE_BYTES} bytes)_"
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            text = data.decode("utf-8", errors="replace")
+        numbered = "\n".join(
+            f"{i + 1:5d}  {line}" for i, line in enumerate(text.splitlines())
+        )
+        sections.append(f"### {rel}{truncated_note}\n```\n{numbered}\n```")
+        included.append(rel)
+    return "\n\n".join(sections), included
+
+
+WIKILINK_RE = re.compile(r"\[\[([^\]|#]+)(?:[#|][^\]]*)?\]\]")
+
+# Path references: matched in three forms (anchored on common punctuation):
+#   1. Absolute path: starts with '/', any depth, no extension required
+#   2. Relative path with known extension: scripts/foo.py, docs/notes.md
+#   3. Top-level filename with known extension: README.md, foo.sh
+# Tokens containing '/' but NO known extension (e.g. prose like "gather/run_git",
+# "abs/rel") are intentionally NOT matched -- they generated false-positive
+# '_(file missing)_' noise on plans containing slash-separated identifiers.
+# `K2B-Vault/...` shorthand is NOT specially handled -- callers wanting vault
+# files use absolute paths (K2B-Vault is a sibling of the repo, not a subdir).
+_PATH_EXT = "py|sh|md|json|ya?ml|toml|js|ts|tsx|jsx|html|css|sql|txt|env"
+PATH_REF_RE = re.compile(
+    r"(?:^|[\s`(\[<,;])"
+    r"("
+    r"/(?:[\w.\-]+/)*[\w.\-]+"                                 # absolute path
+    r"|"
+    r"(?:[\w.\-]+/)+[\w.\-]+\.(?:" + _PATH_EXT + ")"            # rel path + ext
+    r"|"
+    r"[\w][\w.\-]*\.(?:" + _PATH_EXT + ")"                      # bare filename + ext
+    r")"
+    r"(?=[\s`)\]>.,;:!?]|$)",
+    re.MULTILINE,
+)
+
+
+def _resolve_wikilink(token: str, root: Path) -> Path | None:
+    """Resolve a bare [[wikilink]] target by searching wiki/ then raw/.
+
+    Returns the first matching .md file, or repo-root-relative <token>.md as
+    a final fallback. None means we couldn't identify any file.
+    """
+    for subdir in ("wiki", "raw"):
+        base = root / subdir
+        if not base.is_dir():
+            continue
+        for ext in (".md", ""):
+            for match in base.rglob(f"{token}{ext}"):
+                if match.is_file():
+                    return match
+    candidate = root / f"{token}.md"
+    if candidate.is_file():
+        return candidate
+    return None
+
+
+def _resolve_path_ref(token: str, root: Path) -> Path:
+    """Resolve a path token (abs or rel) to a Path.
+
+    Returns the candidate Path (whether or not it exists). Caller checks
+    `.is_file()` -- missing files are marked in the output, never silently
+    dropped (per the Phase A 'mark, don't drop' rule).
+    """
+    if Path(token).is_absolute():
+        return Path(token)
+    return root / token
+
+
+def gather_plan_context(
+    plan_path: str,
+    repo_root: Path | None = None,
+) -> tuple[str, list[str]]:
+    """Return (context_text, file_list) for a plan file and its references.
+
+    Parses [[wikilinks]] (resolved via wiki/ then raw/ search), inline path
+    references (any token containing '/' or ending in a known file extension),
+    and absolute paths.
+
+    Failure modes (intentionally distinct):
+      - Unparseable wikilink (no file matches the search) -> warn to stderr,
+        skip. We can't mark what we couldn't identify.
+      - Path ref that resolves to a missing file -> include `### <token>`
+        section with `_(file missing)_` marker. Caller knows exactly which
+        file was meant; reviewer needs to see the gap.
+    """
+    root = repo_root or REPO_ROOT
+    plan_full = (
+        Path(plan_path) if Path(plan_path).is_absolute() else (root / plan_path)
+    )
+    if not plan_full.is_file():
+        raise FileNotFoundError(f"plan not found: {plan_full}")
+
+    plan_text = plan_full.read_text(errors="replace")
+
+    found_refs: list[tuple[str, Path]] = []  # (display_name, real_path)
+    missing_refs: list[str] = []  # display_name only
+    seen: set[str] = set()
+
+    def _track(display: str, real: Path | None) -> None:
+        if display in seen or display == plan_path:
+            return
+        seen.add(display)
+        if real is not None and real.is_file():
+            found_refs.append((display, real))
+        else:
+            missing_refs.append(display)
+
+    for match in WIKILINK_RE.finditer(plan_text):
+        token = match.group(1).strip()
+        resolved = _resolve_wikilink(token, root)
+        if resolved is None:
+            print(
+                f"[minimax-review] warning: unresolvable wikilink: [[{token}]]",
+                file=sys.stderr,
+            )
+            continue
+        try:
+            display = str(resolved.relative_to(root))
+        except ValueError:
+            display = str(resolved)
+        _track(display, resolved)
+
+    for match in PATH_REF_RE.finditer(plan_text):
+        token = match.group(1).strip()
+        resolved = _resolve_path_ref(token, root)
+        try:
+            display = str(resolved.relative_to(root))
+        except ValueError:
+            display = token  # absolute path or out-of-tree
+        _track(display, resolved if resolved.is_file() else None)
+
+    sections: list[str] = []
+    sections.append("## plan-scoped review")
+    sections.append(f"### {plan_path} (plan)")
+    numbered_plan = "\n".join(
+        f"{i + 1:5d}  {line}" for i, line in enumerate(plan_text.splitlines())
+    )
+    sections.append(f"```\n{numbered_plan}\n```")
+
+    if found_refs or missing_refs:
+        sections.append("### Referenced files")
+        for display, real in found_refs:
+            if is_binary(real):
+                sections.append(f"#### {display}\n_(binary, skipped)_")
+                continue
+            try:
+                data = real.read_bytes()
+            except OSError as e:
+                sections.append(f"#### {display}\n_(unreadable: {e})_")
+                continue
+            truncated_note = ""
+            if len(data) > MAX_FILE_BYTES:
+                data = data[:MAX_FILE_BYTES]
+                truncated_note = f"\n_(truncated to {MAX_FILE_BYTES} bytes)_"
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                text = data.decode("utf-8", errors="replace")
+            numbered = "\n".join(
+                f"{i + 1:5d}  {line}" for i, line in enumerate(text.splitlines())
+            )
+            sections.append(f"#### {display}{truncated_note}\n```\n{numbered}\n```")
+        for display in missing_refs:
+            sections.append(f"#### {display}\n_(file missing)_")
+
+    file_list = [plan_path] + [d for d, _ in found_refs] + missing_refs
+    return "\n\n".join(sections), file_list
 
 
 def build_prompt(target_label: str, focus: str, content: str, schema_text: str) -> str:
@@ -261,8 +540,23 @@ def main() -> int:
     parser.add_argument(
         "--scope",
         default="working-tree",
-        choices=["working-tree"],
-        help="(Phase A: working-tree only)",
+        choices=["working-tree", "diff", "plan", "files"],
+        help=(
+            "Context gatherer: 'working-tree' (default, Phase A behavior), "
+            "'diff' (only --files paths + their diffs), "
+            "'plan' (--plan path + files it references), "
+            "'files' (just --files paths, no git context)"
+        ),
+    )
+    parser.add_argument(
+        "--plan",
+        default=None,
+        help="Plan file path (required when --scope plan)",
+    )
+    parser.add_argument(
+        "--files",
+        default=None,
+        help="Comma-separated list of paths (required when --scope diff or files)",
     )
     parser.add_argument(
         "--model",
@@ -300,19 +594,72 @@ def main() -> int:
     schema_text = SCHEMA_PATH.read_text()
 
     print(f"[minimax-review] gathering {args.scope} context...", file=sys.stderr)
-    context, changed = gather_working_tree_context()
-    if not changed:
-        print("[minimax-review] no working-tree changes; nothing to review.", file=sys.stderr)
-        return 0
+    if args.scope == "working-tree":
+        context, changed = gather_working_tree_context()
+        if not changed:
+            print(
+                "[minimax-review] no working-tree changes; nothing to review.",
+                file=sys.stderr,
+            )
+            return 0
+    elif args.scope == "diff":
+        if not args.files:
+            print("[minimax-review] --scope diff requires --files", file=sys.stderr)
+            return 1
+        file_list = [p.strip() for p in args.files.split(",") if p.strip()]
+        if not file_list:
+            print(
+                "[minimax-review] --scope diff: --files parsed to empty list",
+                file=sys.stderr,
+            )
+            return 1
+        context, changed = gather_diff_scoped_context(file_list)
+    elif args.scope == "plan":
+        if not args.plan:
+            print("[minimax-review] --scope plan requires --plan", file=sys.stderr)
+            return 1
+        try:
+            context, changed = gather_plan_context(args.plan)
+        except FileNotFoundError as e:
+            print(f"[minimax-review] {e}", file=sys.stderr)
+            return 1
+    elif args.scope == "files":
+        if not args.files:
+            print("[minimax-review] --scope files requires --files", file=sys.stderr)
+            return 1
+        file_list = [p.strip() for p in args.files.split(",") if p.strip()]
+        if not file_list:
+            print(
+                "[minimax-review] --scope files: --files parsed to empty list",
+                file=sys.stderr,
+            )
+            return 1
+        context, changed = gather_file_list_context(file_list)
+    else:
+        print(f"[minimax-review] unknown scope: {args.scope}", file=sys.stderr)
+        return 1
     print(
         f"[minimax-review] {len(changed)} changed files, "
         f"{len(context)} chars of context",
         file=sys.stderr,
     )
 
-    target_label = (
-        f"working tree of {REPO_ROOT.name} ({len(changed)} files changed)"
-    )
+    if args.scope == "working-tree":
+        # Phase A wording preserved verbatim -- byte-for-byte back-compat for
+        # the prompt MiniMax sees. Do not alter.
+        target_label = (
+            f"working tree of {REPO_ROOT.name} ({len(changed)} files changed)"
+        )
+    elif args.scope == "diff":
+        target_label = (
+            f"diff-scoped review of {REPO_ROOT.name} ({len(changed)} files)"
+        )
+    elif args.scope == "plan":
+        target_label = f"plan {args.plan} ({len(changed)} files referenced)"
+    else:  # files
+        target_label = (
+            f"explicit file list ({len(changed)} files, repo {REPO_ROOT.name})"
+        )
     prompt = build_prompt(target_label, args.focus, context, schema_text)
 
     print(

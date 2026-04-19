@@ -1,13 +1,19 @@
 #!/usr/bin/env bash
 # Standalone MiniMax M2.7 adversarial code reviewer.
-# Phase A MVP: working-tree scope, single-shot, JSON output.
-# Touches nothing in /ship or the codex plugin -- runs as its own tool.
+# Single-shot, JSON output. Touches nothing in /ship or the codex plugin --
+# runs as its own tool.
 #
 # Usage:
-#   scripts/minimax-review.sh                       # review working tree
-#   scripts/minimax-review.sh --focus "auth path"   # extra focus area
-#   scripts/minimax-review.sh --json                # raw JSON to stdout
-#   scripts/minimax-review.sh --model MiniMax-M2.5  # try a different model
+#   scripts/minimax-review.sh                                  # working-tree (default)
+#   scripts/minimax-review.sh --focus "auth path"              # extra focus area
+#   scripts/minimax-review.sh --json                           # raw JSON to stdout
+#   scripts/minimax-review.sh --model MiniMax-M2.5             # different model
+#
+# Scopes (Phase B):
+#   --scope working-tree                                       # default, all dirty files
+#   --scope diff --files a.py,b.py                             # only listed files + diffs
+#   --scope plan --plan plans/2026-04-19_my-plan.md            # plan + files it references
+#   --scope files --files a.py,b.py                            # explicit list, no git context
 #
 # Endpoint pinned to https://api.minimaxi.com (global). Override with
 # MINIMAX_API_HOST env var if you really need to.
