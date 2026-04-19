@@ -3,6 +3,31 @@
 Session-by-session ship log. Append-only. New entries on top.
 
 
+## 2026-04-19 -- Guaranteed-progress review wrapper (scripts/review.sh)
+
+**Commit:** `e5b90c7` feat(review): guaranteed-progress review wrapper with deadline + fallback + heartbeat
+
+**What shipped:** New `scripts/review.sh` entrypoint that routes every code-review invocation through a single orchestrator (`scripts/lib/review_runner.py`, ~380 LOC) providing three guarantees: (1) hard 360s SIGTERM deadline per reviewer plus 10s-grace SIGKILL, (2) automatic Codex -> MiniMax fallback on primary failure or timeout, (3) watchdog thread injecting HEARTBEAT log lines every 5s with phase tags (`running_commands` / `final_inference` / `wedge_suspected`) so polling never returns silence even during Codex's 13-61s end_gap or MiniMax's synchronous HTTP POST. `scripts/review-poll.sh` exposes structured status (elapsed_s, last_activity_s_ago, deadline_remaining_s, reviewer_attempts, tail) for the assistant to surface to Keith at 30s intervals. Enforcement is hard-wired via `.claude/hooks/review-guard.sh` (PreToolUse) which blocks direct `codex-companion.mjs review|adversarial-review` and `scripts/minimax-review.sh` invocations outside the wrapper, while allowing diagnostic `--help|--version|status|task|result` calls through; fail-closed on empty stdin, missing python3, or unparseable hook JSON. The skill's review sections (invest-ship/SKILL.md) were rewritten to mandate the wrapper as the sole entrypoint. Dogfooded end-to-end: three review rounds across this session each exercised a different Codex-side failure (scope rename, `--focus` removal, EISDIR on untracked `.claude/worktrees/`) and the fallback caught every one in <1s; R2 + R3 both MiniMax APPROVE with zero findings after the R1 critical + 2 high + 1 medium were addressed. `.claude/hooks/` added to `scripts/deploy-config.yml` excludes since PreToolUse hooks run on the MacBook where Claude Code runs, not on the Trader-tier Mini.
+
+**Codex review:** skipped per `--skip-codex codex-unavailable-minimax-verified`. Codex plugin never completed a run due to API renames between plugin versions (R1: `--scope current` rejected, R2: `--focus` moved from `review` to `adversarial-review` and became positional) plus environmental `.claude/worktrees/` EISDIR (R3). Each failure routed automatically to MiniMax M2.7 via the wrapper's fallback chain in <1s. R2 and R3 both MiniMax APPROVE zero findings; R1 MiniMax needs-attention 4 findings (CRITICAL fail-closed guard, HIGH build_codex_cmd drops files arg, HIGH forked-daemon signal handler inheritance, MEDIUM fallback misses rc==0 with empty output) all addressed inline with the fail-closed stdin check, signal reset to SIG_DFL in the forked child, and verdict-marker quality gate that escalates silent rc==0 to effective_rc=125. Archives: `.minimax-reviews/2026-04-19T08-52-34Z_files.json` (R2) and `.minimax-reviews/2026-04-19T08-57-03Z_files.json` (R3).
+
+**Feature status change:** none -- `--no-feature` infrastructure. K2Bi-Vault does not yet have a `wiki/concepts/` feature-note scaffold (Phase 1 still writing directory structure).
+
+**Follow-ups:**
+- Add `.claude/worktrees/` to `.gitignore` so Codex working-tree scope will not EISDIR on untracked superpowers-skill worktrees.
+- Add `--base <ref>` support in `build_codex_cmd` so Codex can scope past untracked dirs cleanly.
+- `build_codex_cmd` for `scope=plan` returns None (Codex plugin dropped `--path`); all plan reviews now run on MiniMax. Revisit if a future Codex plugin restores file-scope review.
+- Register review-guard.sh pipe-test in any future CI once K2Bi gets a test runner for this tier.
+
+**Key decisions (if divergent from claude.ai project specs):**
+- Hard enforcement via PreToolUse hook (not soft skill discipline). Keith's explicit requirement: "guarantee no matter how it is being called -- we will use the poll no matter how". Documentation-only paths failed in K2B historically; the hook is the physical layer.
+- Wrapper self-backgrounds via `os.fork()` + `os.setsid()` rather than relying on callers to pass `run_in_background=true`. Background is non-optional.
+- Plan scope on Codex returns `None` to force MiniMax fallback since the current Codex plugin dropped `--path` support. Documented in `build_codex_cmd` docstring with the live `codex-companion.mjs --help` output that verified the API surface.
+- Quality-gate exit code `125` (distinct from `124` deadline) so fallback logic can distinguish "reviewer returned 0 but produced no verdict" from "reviewer timed out" without string-matching the log. Callers can upgrade telemetry later without re-spelunking log text.
+- Audit reason strings: added `codex-timeout-minimax-timeout`, `codex-wedged-minimax-unavailable` to the SKILL.md alongside the legacy `codex-unavailable` / `codex-unavailable-minimax-verified` so future skip-reasons carry more signal than a single catch-all.
+
+---
+
 ## 2026-04-19 -- Bundle 3 cycle 6 ships: invest-propose-limits MVP
 
 **Commit:** `dd10d9d` feat(invest-propose-limits): MVP -- structured delta + safety-impact + review/strategy-approvals output
