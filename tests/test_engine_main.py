@@ -483,6 +483,290 @@ class OrderSubmissionTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await self._unpatch_now()
 
+    async def test_retire_sentinel_blocks_submit_with_strategy_retired_journal(self):
+        # Bundle 3 cycle 3 (spec §3.2 + Q7): if the per-strategy
+        # retirement sentinel is present at submit time, the engine
+        # must refuse the order synchronously in the submit path,
+        # journal order_rejected with reason=strategy_retired, and
+        # never touch the broker. No new event type is required;
+        # order_rejected is already in schema v2.
+        from execution.risk import kill_switch
+
+        await self._patch_now(_mid_session_utc())
+        try:
+            await self.engine.tick_once()  # INIT
+
+            # Retire the strategy mid-session. The retired_dir defaults
+            # to kill_path.parent (= self.base) for test isolation.
+            retired_path = kill_switch.write_retired(
+                "spy-rotational",
+                reason="cycle 3 synthetic retire",
+                commit_sha="testsha",
+                base_dir=self.base,
+            )
+            self.assertIsNotNone(retired_path)
+
+            tick = await self.engine.tick_once()
+            self.assertEqual(tick.state_after, EngineState.CONNECTED_IDLE)
+            self.assertEqual(tick.orders_submitted, 0)
+            self.assertEqual(tick.orders_rejected, 1)
+            # Broker was never called -- the sentinel check is
+            # synchronous and short-circuits before submit_order().
+            self.assertEqual(len(self.connector.submitted_orders), 0)
+
+            events = self.journal.read_all()
+            # R2-minimax P2: retirement check runs BEFORE the runner,
+            # so a retired strategy never reaches validators nor
+            # journals order_proposed. The only order_* event for this
+            # tick is a single order_rejected with reason=strategy_retired.
+            event_types = [e["event_type"] for e in events]
+            self.assertNotIn("order_proposed", event_types)
+            self.assertNotIn("order_submitted", event_types)
+
+            rejections = [
+                e for e in events
+                if e["event_type"] == "order_rejected"
+                and e["payload"].get("reason") == "strategy_retired"
+            ]
+            self.assertEqual(len(rejections), 1)
+            rejection = rejections[0]
+            self.assertEqual(rejection["strategy"], "spy-rotational")
+            retired_record = rejection["payload"]["retired_record"]
+            self.assertEqual(retired_record["slug"], "spy-rotational")
+            self.assertEqual(retired_record["commit_sha"], "testsha")
+            # R1-minimax: the payload carries the snapshot's sha256 +
+            # approval commit so replay can pin the rejection to an
+            # exact approved snapshot without re-loading the file.
+            self.assertIn("strategy_sha256", rejection["payload"])
+            self.assertIn(
+                "strategy_approved_commit", rejection["payload"]
+            )
+            self.assertEqual(
+                rejection["payload"]["strategy_approved_commit"],
+                "abc1234",
+            )
+        finally:
+            await self._unpatch_now()
+
+    async def test_invalid_strategy_slug_journals_rejection_without_crash(self):
+        # R5-minimax P1 + Codex R4: the engine-level ValueError handler
+        # is defense-in-depth for the narrow case where a strategy
+        # snapshot carries a name that fails _validate_slug (empty,
+        # non-str, or NUL byte). This test uses a monkey-patch to
+        # force the sentinel check to raise ValueError, since YAML
+        # frontmatter cannot realistically produce those inputs from
+        # the loader and we only care that the engine doesn't crash
+        # the tick when the exception surfaces.
+        from execution.risk import kill_switch
+
+        await self._patch_now(_mid_session_utc())
+
+        original = kill_switch.assert_strategy_not_retired
+
+        def _raise_value_error(slug, base_dir=None):
+            raise ValueError(
+                f"synthetic: invalid strategy slug {slug!r}"
+            )
+
+        kill_switch.assert_strategy_not_retired = _raise_value_error
+        try:
+            await self.engine.tick_once()  # INIT
+            tick = await self.engine.tick_once()  # process
+            # Tick did NOT crash -- it returned a valid TickResult.
+            self.assertEqual(tick.state_after, EngineState.CONNECTED_IDLE)
+            # No broker call occurred.
+            self.assertEqual(len(self.connector.submitted_orders), 0)
+            events = self.journal.read_all()
+            invalid_rejections = [
+                e for e in events
+                if e["event_type"] == "order_rejected"
+                and e["payload"].get("reason") == "strategy_name_invalid"
+            ]
+            self.assertEqual(len(invalid_rejections), 1)
+            self.assertIn("error", invalid_rejections[0]["payload"])
+        finally:
+            kill_switch.assert_strategy_not_retired = original
+            await self._unpatch_now()
+
+    async def test_retire_sentinel_keyed_by_filename_slug_not_frontmatter_name(self):
+        # Codex R5 P1: the cycle-4 post-commit hook derives its slug
+        # from the `Retired-Strategy: strategy_<slug>` commit trailer,
+        # which comes from the filename, not the `name:` frontmatter.
+        # The engine MUST honor the same derivation so both sides key
+        # sentinels identically. This test writes a strategy file where
+        # the on-disk filename slug and the frontmatter `name:` differ,
+        # then retires via the FILENAME slug, and asserts the engine
+        # still blocks submits.
+        from execution.risk import kill_switch
+
+        # Remove the default fixture strategy; write a new one with a
+        # mismatched filename vs. frontmatter-name.
+        (self.strategies_dir / "spy-rotational.md").unlink()
+        mismatched = self.strategies_dir / "strategy_spy-canonical-slug.md"
+        mismatched.write_text(
+            "---\n"
+            "name: DisplayNameDiffers\n"
+            "status: approved\n"
+            "strategy_type: hand_crafted\n"
+            "risk_envelope_pct: 0.01\n"
+            "approved_at: 2026-05-01T10:00:00Z\n"
+            "approved_commit_sha: abc1234\n"
+            "order:\n"
+            "  ticker: SPY\n"
+            "  side: buy\n"
+            "  qty: 10\n"
+            "  limit_price: 500.00\n"
+            "  stop_loss: 495.00\n"
+            "  time_in_force: DAY\n"
+            "---\n\n## How This Works\n\nFilename-slug precedence test.\n",
+            encoding="utf-8",
+        )
+
+        from execution.engine.main import Engine
+        engine = Engine(
+            connector=self.connector,
+            journal=self.journal,
+            validator_config=CONFIG,
+            engine_config=EngineConfig(
+                tick_seconds=DEFAULT_TICK_SECONDS,
+                strategies_dir=self.strategies_dir,
+                kill_path=self.kill_path,
+            ),
+        )
+
+        # Retire via the FILENAME slug (what the cycle-4 hook would do).
+        kill_switch.write_retired(
+            "spy-canonical-slug",
+            reason="filename-slug retire",
+            commit_sha="deadbeef",
+            base_dir=self.base,
+        )
+
+        await self._patch_now(_mid_session_utc())
+        try:
+            await engine.tick_once()  # INIT
+            tick = await engine.tick_once()
+            self.assertEqual(tick.orders_rejected, 1)
+            self.assertEqual(tick.orders_submitted, 0)
+            events = self.journal.read_all()
+            retired = [
+                e for e in events
+                if e["event_type"] == "order_rejected"
+                and e["payload"].get("reason") == "strategy_retired"
+            ]
+            self.assertEqual(
+                len(retired), 1,
+                "engine must key sentinels by filename slug so the cycle-4 "
+                "hook's Retired-Strategy: strategy_<slug> trailer matches"
+            )
+        finally:
+            await self._unpatch_now()
+
+    async def test_retire_slug_is_filename_stem_not_frontmatter_name_flat_layout(self):
+        # Codex R6: even in the flat layout `<slug>.md` (no `strategy_`
+        # prefix), the sentinel must key by filename stem, NOT by
+        # frontmatter `name:`. The loader doesn't enforce name==stem,
+        # and the cycle-4 hook writes by filename, so falling back to
+        # snap.name would let a name/filename drift silently bypass
+        # the retirement gate.
+        from execution.risk import kill_switch
+
+        # Rewrite the default strategy so filename stem and
+        # frontmatter name DIFFER in flat layout.
+        (self.strategies_dir / "spy-rotational.md").unlink()
+        drift_file = self.strategies_dir / "meanrev-v2.md"
+        drift_file.write_text(
+            "---\n"
+            "name: meanrev\n"
+            "status: approved\n"
+            "strategy_type: hand_crafted\n"
+            "risk_envelope_pct: 0.01\n"
+            "approved_at: 2026-05-01T10:00:00Z\n"
+            "approved_commit_sha: abc1234\n"
+            "order:\n"
+            "  ticker: SPY\n"
+            "  side: buy\n"
+            "  qty: 10\n"
+            "  limit_price: 500.00\n"
+            "  stop_loss: 495.00\n"
+            "  time_in_force: DAY\n"
+            "---\n\n## How This Works\n\nFlat-layout name drift test.\n",
+            encoding="utf-8",
+        )
+
+        from execution.engine.main import Engine
+        engine = Engine(
+            connector=self.connector,
+            journal=self.journal,
+            validator_config=CONFIG,
+            engine_config=EngineConfig(
+                tick_seconds=DEFAULT_TICK_SECONDS,
+                strategies_dir=self.strategies_dir,
+                kill_path=self.kill_path,
+            ),
+        )
+
+        # Retire via the filename stem (what the hook would do).
+        kill_switch.write_retired(
+            "meanrev-v2",
+            reason="drift test",
+            commit_sha="deadbeef",
+            base_dir=self.base,
+        )
+
+        # Sanity: a sentinel keyed by the frontmatter name would
+        # NOT block submits (the reverse assertion).
+        self.assertFalse(
+            kill_switch.is_strategy_retired(
+                "meanrev", base_dir=self.base
+            )
+        )
+
+        await self._patch_now(_mid_session_utc())
+        try:
+            await engine.tick_once()  # INIT
+            tick = await engine.tick_once()
+            self.assertEqual(tick.orders_rejected, 1)
+            self.assertEqual(tick.orders_submitted, 0)
+        finally:
+            await self._unpatch_now()
+
+    async def test_retire_sentinel_is_per_strategy_not_global(self):
+        # Cross-strategy isolation at the engine boundary: a sentinel for
+        # a different slug must NOT affect spy-rotational's submits. Use
+        # the same tick flow as the clean submit test but with a sentinel
+        # for an unrelated strategy written beforehand.
+        from execution.risk import kill_switch
+
+        await self._patch_now(_mid_session_utc())
+        try:
+            # Write a sentinel for a strategy the engine doesn't have
+            # loaded. This must be a no-op for the spy-rotational flow.
+            kill_switch.write_retired(
+                "atr-trail",
+                reason="unrelated",
+                commit_sha="ffffff",
+                base_dir=self.base,
+            )
+
+            await self.engine.tick_once()  # INIT
+            submit_tick = await self.engine.tick_once()
+            self.assertEqual(submit_tick.orders_submitted, 1)
+            self.assertEqual(submit_tick.orders_rejected, 0)
+            self.assertEqual(submit_tick.state_after, EngineState.AWAITING_FILL)
+
+            events = self.journal.read_all()
+            event_types = [e["event_type"] for e in events]
+            self.assertIn("order_submitted", event_types)
+            rejections = [
+                e for e in events
+                if e["event_type"] == "order_rejected"
+                and e["payload"].get("reason") == "strategy_retired"
+            ]
+            self.assertEqual(rejections, [])
+        finally:
+            await self._unpatch_now()
+
     async def test_kill_cleared_resumes(self):
         await self._patch_now(_mid_session_utc())
         try:
@@ -916,6 +1200,34 @@ class EngineConfigFromDictTests(unittest.TestCase):
 
         cfg = _engine_config_from_dict({"regime_file": "/tmp/custom-regime.md"})
         self.assertEqual(str(cfg.regime_file), "/tmp/custom-regime.md")
+
+    def test_yaml_retired_dir_preserved(self):
+        # Bundle 3 cycle 3 R1-minimax: YAML-configured retired_dir must
+        # reach EngineConfig. Without the wiring, deployments that
+        # configure a non-default sentinel base silently fall back to
+        # kill_path.parent / DEFAULT_RETIRED_DIR and the config is inert.
+        from execution.engine.main import _engine_config_from_dict
+
+        cfg = _engine_config_from_dict({"retired_dir": "/tmp/custom-retired"})
+        self.assertEqual(str(cfg.retired_dir), "/tmp/custom-retired")
+
+    def test_yaml_retired_dir_defaults_to_none(self):
+        # Absent key -> None so the engine's _retired_dir() chain picks
+        # kill_path.parent (test fixtures) or DEFAULT_RETIRED_DIR (prod).
+        from execution.engine.main import _engine_config_from_dict
+
+        cfg = _engine_config_from_dict({})
+        self.assertIsNone(cfg.retired_dir)
+
+    def test_yaml_retired_dir_empty_string_treated_as_none(self):
+        # R11-minimax claim check: an explicit empty-string
+        # retired_dir must not resolve to Path("") (which equals CWD
+        # and would silently disable the gate). The truthiness guard
+        # in _engine_config_from_dict handles this.
+        from execution.engine.main import _engine_config_from_dict
+
+        cfg = _engine_config_from_dict({"retired_dir": ""})
+        self.assertIsNone(cfg.retired_dir)
 
 
 class FillDedupeTests(unittest.IsolatedAsyncioTestCase):

@@ -149,6 +149,13 @@ class EngineConfig:
     eod_et_time: str = DEFAULT_EOD_ET
     strategies_dir: Path = field(default_factory=lambda: DEFAULT_STRATEGIES_DIR)
     kill_path: Path | None = None  # None -> kill_switch.DEFAULT_KILL_PATH
+    # Base dir holding per-strategy `.retired-<slug>` sentinels (Bundle 3
+    # m2.17, Q7). None falls back to kill_path.parent when a custom
+    # kill_path is set -- so test fixtures that scope .killed to a tmp
+    # dir automatically scope retirement sentinels to the same tmp dir
+    # and cannot accidentally read the real vault's sentinels. With no
+    # custom kill_path either, falls back to kill_switch.DEFAULT_RETIRED_DIR.
+    retired_dir: Path | None = None
     allow_recovery_mismatch_env: str = recovery_mod.RECOVERY_OVERRIDE_ENV
     # Codex round-12 P1: regime source for strategy gating. The file
     # is vault-side + populated by invest-regime (Phase 2 manual
@@ -621,6 +628,12 @@ class Engine:
                 ),
                 "validator_config_hash": _hash_config(self.validator_config),
                 "kill_file_present_at_startup": self._kill_file_present(),
+                # R5-minimax: surface the resolved retired_dir so
+                # operators can diff it against the cycle-4 post-commit
+                # hook's write target. A mismatch = silently-disabled
+                # retirement gate; publishing the engine's view in the
+                # journal makes the coupling visible at deploy time.
+                "retired_dir": str(self._retired_dir()),
             },
         )
         if reco.status in (
@@ -788,6 +801,22 @@ class Engine:
     def _kill_file_present(self) -> bool:
         return kill_switch.is_killed(self.engine_config.kill_path)
 
+    def _retired_dir(self) -> Path:
+        """Base dir for per-strategy `.retired-<slug>` sentinels.
+
+        Thin delegation to `kill_switch.resolve_retired_dir` so the
+        engine (reader) and the cycle-4 post-commit hook (writer)
+        share a single resolver; any path-derivation change lands in
+        one place.
+        """
+        return kill_switch.resolve_retired_dir(
+            self.engine_config.retired_dir,
+            self.engine_config.kill_path,
+        )
+
+    def _retire_slug(self, snap: ApprovedStrategySnapshot) -> str:
+        return derive_retire_slug(snap.source_path)
+
     async def _transition_to_killed(self, result: TickResult) -> None:
         """Observe an externally-written .killed and transition KILLED.
 
@@ -915,6 +944,51 @@ class Engine:
         market = MarketSnapshot(ts=now, marks=marks, account_value=account.net_liquidation)
 
         for snap in self._strategies:
+            # R2-minimax P2: retirement sentinel check runs BEFORE the
+            # runner so a retired strategy never emits order_proposed.
+            # The _submit-level check remains as defense-in-depth for
+            # the narrow window where a sentinel lands mid-tick between
+            # this iteration's check and the broker call.
+            # R5-minimax P1: a ValueError from _validate_slug (name that
+            # bypassed the pre-commit hook) must not crash the whole
+            # tick. Fail-closed on this strategy by journaling
+            # strategy_name_invalid and skipping it; other strategies
+            # in self._strategies continue to be evaluated.
+            try:
+                kill_switch.assert_strategy_not_retired(
+                    self._retire_slug(snap), base_dir=self._retired_dir()
+                )
+            except kill_switch.StrategyRetiredError as exc:
+                self.journal.append(
+                    "order_rejected",
+                    payload={
+                        "reason": "strategy_retired",
+                        "retired_record": exc.record,
+                        "strategy_sha256": snap.source_sha256,
+                        "strategy_approved_commit": snap.approved_commit_sha,
+                    },
+                    strategy=snap.name,
+                    trade_id=new_ulid(),
+                )
+                result.strategies_evaluated += 1
+                result.orders_rejected += 1
+                continue
+            except ValueError as exc:
+                self.journal.append(
+                    "order_rejected",
+                    payload={
+                        "reason": "strategy_name_invalid",
+                        "error": str(exc),
+                        "strategy_sha256": snap.source_sha256,
+                        "strategy_approved_commit": snap.approved_commit_sha,
+                    },
+                    strategy=snap.name,
+                    trade_id=new_ulid(),
+                )
+                result.strategies_evaluated += 1
+                result.orders_rejected += 1
+                continue
+
             result.strategies_evaluated += 1
             decision = strategy_runner.evaluate(
                 snap,
@@ -1013,6 +1087,44 @@ class Engine:
                 trade_id=trade_id,
             )
             self.state = EngineState.CONNECTED_IDLE
+            return
+
+        # Bundle 3 m2.17, Q7: retirement sentinel check. The per-
+        # strategy `.retired-<slug>` file is written atomically by the
+        # post-commit hook (cycle 4) when /invest-ship --retire-strategy
+        # lands. Checking it synchronously here closes the one-tick
+        # exposure window left by the file-hash drift detection, which
+        # only fires at the next tick boundary. strategy_retired is a
+        # payload.reason on order_rejected (no new event type needed;
+        # order_rejected is already in schema v2).
+        try:
+            kill_switch.assert_strategy_not_retired(
+                self._retire_slug(snap), base_dir=self._retired_dir()
+            )
+        except kill_switch.StrategyRetiredError as exc:
+            # R1-minimax: mirror order_proposed's snapshot metadata so
+            # replay can pin the rejection to the exact approved
+            # snapshot that was blocked (by sha256 + approval commit)
+            # without having to re-load the strategy file.
+            self.journal.append(
+                "order_rejected",
+                payload={
+                    "reason": "strategy_retired",
+                    "ticker": order.ticker,
+                    "side": order.side,
+                    "qty": order.qty,
+                    "retired_record": exc.record,
+                    "strategy_sha256": snap.source_sha256,
+                    "strategy_approved_commit": snap.approved_commit_sha,
+                },
+                strategy=snap.name,
+                trade_id=trade_id,
+                ticker=order.ticker,
+                side=order.side,
+                qty=order.qty,
+            )
+            self.state = EngineState.CONNECTED_IDLE
+            result.orders_rejected += 1
             return
 
         try:
@@ -1709,6 +1821,36 @@ def _hash_config(config: dict[str, Any]) -> str:
     return hashlib.sha256(payload).hexdigest()[:16]
 
 
+def derive_retire_slug(source_path: str) -> str:
+    """Filesystem slug used to key this strategy's retirement sentinel.
+
+    Codex R5 + R6: the cycle-4 post-commit hook keys sentinels by the
+    slug extracted from the `Retired-Strategy: strategy_<slug>` commit
+    trailer -- which comes from the FILENAME, not the `name:`
+    frontmatter. The engine MUST use the same derivation so both
+    sides always agree, and MUST NEVER fall back to `snap.name`
+    (which can drift from the filename in flat-layout or manually-
+    edited files: e.g. `meanrev-v2.md` with `name: meanrev` would
+    retire under one key and check under another, silently bypassing
+    the gate).
+
+    In the K2Bi convention (`wiki/strategies/strategy_<slug>.md`),
+    strip the `strategy_` prefix from the filename stem. For the flat
+    `<slug>.md` layout (test fixtures + legacy), use the stem
+    directly. Either way: filename is authoritative.
+
+    Exported as a module-level function (not just an Engine method)
+    so tests can exercise the derivation in isolation and the cycle-4
+    post-commit hook can import it directly, closing the hook/engine
+    parity gap that MiniMax R11 flagged.
+    """
+    stem = Path(source_path).stem
+    prefix = "strategy_"
+    if stem.startswith(prefix):
+        return stem[len(prefix):]
+    return stem
+
+
 def _engine_config_from_dict(raw: dict[str, Any]) -> EngineConfig:
     if not isinstance(raw, dict):
         return EngineConfig()
@@ -1732,6 +1874,14 @@ def _engine_config_from_dict(raw: dict[str, Any]) -> EngineConfig:
             Path(strategies_dir) if strategies_dir else DEFAULT_STRATEGIES_DIR
         ),
         kill_path=(Path(raw["kill_path"]) if raw.get("kill_path") else None),
+        # Bundle 3 cycle 3 R1-minimax: YAML-configured retired_dir must
+        # flow through so deployments can override where per-strategy
+        # `.retired-<slug>` sentinels land (otherwise the field is
+        # silently dropped and always falls through to kill_path.parent
+        # or DEFAULT_RETIRED_DIR).
+        retired_dir=(
+            Path(raw["retired_dir"]) if raw.get("retired_dir") else None
+        ),
         allow_recovery_mismatch_env=str(override_env_name),
         # Codex round-13 P2: deployments that remap the regime file
         # now flow through to the engine instead of silently reverting
