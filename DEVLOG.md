@@ -3,6 +3,28 @@
 Session-by-session ship log. Append-only. New entries on top.
 
 
+## 2026-04-19 -- Review-wrapper hotfix: MiniMax 300s timeout + Codex EISDIR preflight
+
+**Commit:** `c63a5f2` fix(review): bump MiniMax client timeout to 300s + pre-skip Codex on untracked dirs
+
+**What shipped:** Two fixes for Cycle 7 shipping friction surfaced by the new wrapper's honest signals. (A) Raised `scripts/lib/minimax_common.py` `DEFAULT_TIMEOUT_S` from 180s to 300s -- the old client-side ceiling fired before the server finished inference on Bundle 3's 100K+ char cumulative-review prompts (4 of 8 Cycle 7 reviews TimeoutError'd at exactly 181s, shadowing the wrapper's 360s watchdog). 300s gives 60s headroom under the wrapper deadline. (B) Added pre-flight hazard detection in `scripts/lib/review_runner.py` that pre-skips Codex when the dirty tree contains untracked directories or nested git worktrees, since Codex's `--scope working-tree` walks every dirty path and EISDIRs on any directory it tries to `read()`. The Cycle 7 live worktree at `.claude/worktrees/optimistic-nash-cddd4f/` triggered this on every Codex attempt. New `codex_unavailable_reason()` writes a specific reason string into both `state.json`'s `reviewer_attempts[].reason` field and the unified log as `REVIEWER_SKIP reviewer=codex reason=...`, so the skip is observable in `review-poll` output instead of wasting a 0.6s failed attempt per review. Smoke-tested: `./scripts/review.sh files --files <file> --primary codex` now logs `REVIEWER_SKIP reviewer=codex reason=codex --scope working-tree would EISDIR on '.claude/worktrees/optimistic-nash-cddd4f'; routing to MiniMax until the path is removed or committed` and proceeds cleanly to MiniMax.
+
+**Codex review:** skipped per `--skip-codex codex-eisdir-own-fix-minimax-verified` (the very bug this fix addresses would make Codex EISDIR on itself). MiniMax R1 on both fix files returned 5 findings: rejected #1 (HIGH 95% "API key in argv") as a hallucination verifiable via `minimax_common.py:24-39` (env/zshrc-only load); deferred #2 (HIGH 85% "watchdog state race") as theoretically real but prevented in current flow by `stop_event.set()` + `watchdog.join()` before `run_fallback_chain` touches state; deferred #3 (MEDIUM 80% "first-match-only hazard detection") as directionally fine since skip-decision only needs >=1 hazard; #4 and #5 are pre-existing in files not touched by this diff. Archive: `.minimax-reviews/2026-04-19T09-58-44Z_files.json`.
+
+**Feature status change:** none -- follow-up hotfix to the review-wrapper feature shipped at `e5b90c7` earlier in the same session.
+
+**Follow-ups:**
+- Consider bumping MiniMax timeout further (e.g. 540s) if 522K-char cumulative prompts remain a recurring pattern, OR document the per-file fan-out pattern Cycle 7 agent discovered as the canonical cumulative-sweep approach.
+- `_working_tree_eisdir_hazard` returns only the first hazard; a list would surface all problems at once (Codex won't run until every hazard is cleared).
+- The pre-existing minimax_common.py findings (response-structure validation, unbounded body read, error truncation, None token fields) are worth a separate hardening pass once Bundle 3 ships.
+
+**Key decisions (if divergent from claude.ai project specs):**
+- Kept the EISDIR hazard check cheap and fast (two `git` subprocess calls, <10ms total) rather than caching; review invocations are infrequent and the hazard state can change between calls (worktree removed, directory committed).
+- Propagate the skip reason all the way to `state.json` and the unified log. Caller (Keith or another session) reading `review-poll` output sees the specific path that caused the skip, not just "unavailable".
+- Used `--skip-codex codex-eisdir-own-fix-minimax-verified` rather than the generic `codex-unavailable-minimax-verified` so future audits can distinguish the self-reference case from routine Codex outages.
+
+---
+
 ## 2026-04-19 -- Guaranteed-progress review wrapper (scripts/review.sh)
 
 **Commit:** `e5b90c7` feat(review): guaranteed-progress review wrapper with deadline + fallback + heartbeat
