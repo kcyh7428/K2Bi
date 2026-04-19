@@ -11,7 +11,7 @@ Keystone skill for shipping discipline. Replaces the manual Session Discipline c
 
 **Explicit:** Keith says `/ship`, "ship it", "ship this", "wrap up", "end of session", "done shipping", "close out", "commit and push this".
 
-**Proactive prompt:** At the natural end of any session where K2B modified code in `.claude/skills/`, `CLAUDE.md`, `K2B_ARCHITECTURE.md`, `k2b-remote/`, `scripts/`, `k2b-dashboard/`, or a feature note moved into `in-progress` or `shipped` state -- say: "We have uncommitted changes in [list]. Want me to /ship?"
+**Proactive prompt:** At the natural end of any session where K2Bi modified code inside a tree declared in `scripts/deploy-config.yml` (run `python3 scripts/lib/deploy_config.py list-targets` for the live list; currently `.claude/skills/`, `.claude/settings.json`, `CLAUDE.md`, `README.md`, `DEVLOG.md`, `execution/`, `requirements.txt`, `scripts/`, `pm2/`), or a feature note moved into `in-progress` or `shipped` state -- say: "We have uncommitted changes in [list]. Want me to /ship?"
 
 **Do NOT auto-ship.** Always confirm the commit message and the Codex findings before committing.
 
@@ -99,6 +99,31 @@ When the script IS present, it exits non-zero when it finds known rule phrases o
 ```
 
 Keith decides fix-inline or defer. When he defers, append the drift summary to the ship commit body under a "Deferred:" trailer so the next session sees it.
+
+### 0b. Fork-drift audit (advisory)
+
+Run (skip gracefully if absent -- the script lives only in repos that have completed a K2B → fork-name hygiene pass):
+
+```bash
+if [ -x scripts/audit-fork-drift.sh ]; then
+  bash scripts/audit-fork-drift.sh || true
+else
+  echo "fork-drift-audit: skipped (no scripts/audit-fork-drift.sh in $(pwd))"
+fi
+```
+
+This step is **advisory**. A non-zero exit does NOT block `/ship`. The audit greps the working tree for residual K2B references that the fork-time swap missed (vault paths, hardcoded category sets, pm2 process names, K2B skill invocations, K2B GitHub remote, K2B mailbox schema assumptions) and filters intentional historical references through `scripts/fork-audit-allowlist.txt`.
+
+When the script reports hits, surface them to Keith inline:
+
+```
+[warn] fork-drift: <N> hit(s) -- see audit output above
+  decide: fix inline, add to scripts/fork-audit-allowlist.txt with `# <path>: why kept`, or defer.
+```
+
+Keith decides fix-inline / allowlist / defer. When he defers, append the drift summary to the ship commit body under a "Deferred:" trailer so the next session sees it.
+
+The audit is idempotent (re-running with no changes prints `fork-drift-audit: clean`). New drift typically arrives via skill-port work that copies a K2B file without swapping the path -- catching it at `/ship` time is much cheaper than catching it later as a runtime mailbox-validation failure.
 
 ### 1. Scope detection
 
@@ -472,7 +497,7 @@ If any files in categories `skills`, `execution`, `scripts`, or `pm2` (the live 
    PYEOF
    ```
 
-   Required schema fields: `pending` (bool, must be `true` for an active entry), `set_at` (ISO-8601 UTC timestamp), `set_by_commit` (short SHA from step 5), `categories` (list of strings matching the category table), `files` (list of file paths relative to `~/Projects/K2B/`), and `entry_id` (matches the filename stem for traceability). `invest-sync`'s Step 0 validates these fields and fails loud if any are missing.
+   Required schema fields: `pending` (bool, must be `true` for an active entry), `set_at` (ISO-8601 UTC timestamp), `set_by_commit` (short SHA from step 5), `categories` (list of strings matching the category table), `files` (list of file paths relative to the current repo root, e.g. `~/Projects/K2Bi/` for a K2Bi session), and `entry_id` (matches the filename stem for traceability). `invest-sync`'s Step 0 validates these fields and fails loud if any are missing.
 
 2. Tell Keith: "Deferred. Entry `<entry_id>` added to `.pending-sync/` mailbox. Next session's startup hook will surface pending mailbox entries, and any later `/sync` invocation will consume them before checking conversation context."
 

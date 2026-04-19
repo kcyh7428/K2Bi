@@ -1,0 +1,58 @@
+# scripts/fork-audit-allowlist.txt
+#
+# fgrep-safe substrings that the audit-fork-drift.sh script should ignore.
+# Each entry is matched literally against the `filename:lineno:content` lines
+# emitted by `grep -rn`. Lines are filtered out via `grep -vFf`.
+#
+# Convention: every entry is preceded by a `# <path>: why kept` comment so
+# triage decisions stay auditable. When the underlying drift gets ported in
+# a later phase (e.g. invest-research YT flow lands in K2Bi at Phase 2),
+# remove the corresponding allowlist entry rather than leaving it stale.
+
+# scripts/audit-fork-drift.sh: the audit script's own pattern strings trivially
+# match every drift class it searches for; the file is the searcher, not a hit.
+scripts/audit-fork-drift.sh
+
+# scripts/lib/minimax_review.py: comment documenting that vault-shorthand paths
+# (K2B-Vault, K2Bi-Vault) are NOT specially handled by the path resolver. The
+# K2B-Vault token is the docstring example, kept generic across forks.
+# `K2B-Vault/...` shorthand is NOT specially handled
+
+# .claude/skills/invest-ship/SKILL.md: documents that the mailbox lifecycle
+# works identically in K2B + K2Bi sibling repos -- the K2B path is the
+# illustrative sibling example for the cross-fork pattern, not drift.
+For K2B sessions this resolves to `~/Projects/K2B/.pending-sync/`
+
+# .claude/skills/invest-ship/SKILL.md: example session-summary signal bullet
+# (illustrative content showing what observer captures might look like; not a
+# real path to any K2B daemon). Keeping the example concrete > genericizing it.
+[connection] Canonical memory completes the observer->profile->k2b-remote chain
+
+# .claude/skills/invest-vault-writer/SKILL.md: documents that the Dataview DQL
+# helper currently lives in the sibling K2B repo with a Phase 2+ port pending
+# note. Real port deferred; reference is intentional and discoverable.
+Dataview DQL (Phase 2+ port pending)
+
+# .claude/skills/invest-research/SKILL.md: entire skill body intentionally
+# wraps K2B-side YouTube + Telegram + NBLM helpers. Phase 2 port deferred per
+# the skill's own header callout. When the port lands, every K2B reference in
+# this file is removed and this allowlist entry should be dropped with them.
+invest-research/SKILL.md
+
+# .claude/skills/invest-scheduler/SKILL.md: skill is the intentional bridge to
+# K2B's shared k2b-remote scheduler service. Per CLAUDE.md, K2Bi reuses K2B's
+# Mac Mini scheduler infra rather than standing up a duplicate. Whole-file
+# allowlist is appropriate here -- the skill IS the K2B-bridge.
+invest-scheduler/SKILL.md
+
+# .claude/skills/invest-weave/SKILL.md: Phase 4+ schedule target uses the
+# k2b-remote daemon name (inherited from K2B's CLI conventions); the path
+# `~/Projects/K2Bi/k2b-remote` is K2Bi-local once Phase 4 provisions it, not
+# K2B drift. Two-line file-level allowlist keeps this maintainable.
+invest-weave/SKILL.md
+
+# CLAUDE.md: Phase 1 archive pointer to the original K2B-Vault copy of K2Bi
+# planning docs. The pointer is intentional history -- the K2Bi-Vault copy is
+# the live authoritative version going forward, and the K2B-Vault path is
+# kept so a future cleanup can find the frozen archive if needed.
+The original K2B-Vault archive at `~/Projects/K2B-Vault/wiki/projects/k2bi/` is frozen
