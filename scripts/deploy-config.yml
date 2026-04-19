@@ -52,6 +52,7 @@ excludes:
   - .claude/plugins
   - .claude/plans
   - .claude/projects
+  - .claude/worktrees            # subagent worktrees -- local-only, never deployed
   - .claude/settings.local.json  # gitignored per-machine override
   # Python + node detritus
   - .venv
