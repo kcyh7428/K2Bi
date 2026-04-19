@@ -13,7 +13,12 @@ from pathlib import Path
 
 MINIMAX_API_HOST = os.environ.get("MINIMAX_API_HOST", "https://api.minimaxi.com")
 CHAT_PATH = "/v1/text/chatcompletion_v2"
-DEFAULT_TIMEOUT_S = 180
+# 300s aligns with scripts/review.sh's 360s per-reviewer deadline (with 60s
+# headroom for network + archive write). The earlier 180s ceiling caused
+# every Cycle 7 cumulative review with prompt > ~80K chars to TimeoutError
+# at ~181s before the server finished inference -- shadowing the wrapper's
+# watchdog and turning recoverable slow calls into both_failed exits.
+DEFAULT_TIMEOUT_S = 300
 
 
 class MinimaxError(RuntimeError):

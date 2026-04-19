@@ -76,10 +76,83 @@ def write_state(state_path: Path, state: dict) -> None:
     tmp.replace(state_path)
 
 
+def _working_tree_eisdir_hazard(repo_root: Path) -> str | None:
+    """Return the first path that would crash Codex's working-tree walk
+    with EISDIR, or None if the tree is safe for Codex.
+
+    Codex's `--scope working-tree` walks the dirty tree and calls read()
+    on every path. On a directory, that raises
+    `EISDIR: illegal operation on a directory, read` and Codex exits in
+    <1s. Observed during Cycle 7: nested git worktrees (gitignored but
+    physically present) and untracked top-level directories both trigger
+    this. We pre-detect both shapes so the wrapper can skip Codex and
+    route to MiniMax immediately instead of logging a failed attempt
+    on every call.
+    """
+    # Case 1: untracked directories visible to git as `??` (not gitignored).
+    # --directory collapses each entirely-untracked dir into a single
+    # trailing-slash entry.
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "--directory"],
+            cwd=repo_root, capture_output=True, text=True, check=True,
+        )
+        for line in result.stdout.splitlines():
+            if line.endswith("/"):
+                return line.rstrip("/")
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        pass
+
+    # Case 2: nested git worktrees (physically present on disk but
+    # gitignored; the Cycle 7 failure was .claude/worktrees/<slug>/).
+    try:
+        result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=repo_root, capture_output=True, text=True, check=True,
+        )
+        for line in result.stdout.splitlines():
+            if not line.startswith("worktree "):
+                continue
+            wt_path = Path(line[len("worktree "):].strip())
+            try:
+                rel = wt_path.relative_to(repo_root)
+            except ValueError:
+                continue
+            if str(rel) != ".":
+                return str(rel)
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        pass
+
+    return None
+
+
+def codex_unavailable_reason(scope: str, repo_root: Path,
+                             codex_plugin: Path) -> str | None:
+    """Return a short reason string if Codex cannot review this scope, else None.
+
+    The reason is written verbatim to the job's state.json under
+    reviewer_attempts[].reason and to the unified log as REVIEWER_SKIP so
+    the fallback path is observable in review-poll output.
+    """
+    if scope == "plan":
+        return ("plan scope requires --path which current codex-companion.mjs "
+                "dropped; plan reviews always route to MiniMax")
+    companion = codex_plugin / "scripts" / "codex-companion.mjs"
+    if not companion.is_file():
+        return f"codex-companion.mjs not found at {companion}"
+    hazard = _working_tree_eisdir_hazard(repo_root)
+    if hazard is not None:
+        return (f"codex --scope working-tree would EISDIR on '{hazard}'; "
+                f"routing to MiniMax until the path is removed or committed")
+    return None
+
+
 def build_codex_cmd(scope: str, files: list[str] | None, plan: str | None,
                     focus: str, codex_plugin: Path) -> list[str] | None:
     """Return argv for Codex companion, or None when Codex can't handle scope.
 
+    Skip conditions are centralized in codex_unavailable_reason(); if that
+    returns a string the wrapper logs the reason and falls back to MiniMax.
     Verified against live `codex-companion.mjs --help` on 2026-04-19:
 
       Usage:
@@ -93,24 +166,22 @@ def build_codex_cmd(scope: str, files: list[str] | None, plan: str | None,
         a --focus flag. Passing --focus errors out.
       * Neither subcommand supports --path or --files, so Codex cannot scope
         to a single plan file or to an explicit subset of the working tree.
-        For plan scope we return None, forcing the wrapper to fall back to
-        MiniMax (which supports --scope plan --plan <path>).
+      * Codex walks the dirty tree and read()s each path, EISDIRing on any
+        untracked or worktree directory -- pre-detected above.
 
     K2Bi scope -> Codex argv:
       "diff"           -> adversarial-review --wait --scope working-tree [focus]
       "working-tree"   -> adversarial-review --wait --scope working-tree [focus]
       "files"          -> adversarial-review --wait --scope working-tree [focus]
-                          (Codex loses the subset; the caller should use
-                          --primary minimax if subset fidelity matters.)
+                          (Codex loses the subset; callers wanting subset
+                          fidelity should use --primary minimax.)
       "plan"           -> None  (forces fallback to MiniMax)
     """
-    if scope == "plan":
-        return None
-    companion = codex_plugin / "scripts" / "codex-companion.mjs"
-    if not companion.is_file():
+    if codex_unavailable_reason(scope, REPO_ROOT, codex_plugin) is not None:
         return None
     subcmd = "adversarial-review" if focus else "review"
-    cmd = ["node", str(companion), subcmd, "--wait", "--scope", "working-tree"]
+    cmd = ["node", str(codex_plugin / "scripts" / "codex-companion.mjs"),
+           subcmd, "--wait", "--scope", "working-tree"]
     if focus and subcmd == "adversarial-review":
         cmd.append(focus)
     return cmd
@@ -324,12 +395,18 @@ def run_fallback_chain(args: argparse.Namespace, job: str, log_path: Path,
         cmd = cmd_for(reviewer)
         state["reviewer_attempts"] = state.get("reviewer_attempts", [])
         if cmd is None:
+            if reviewer == "codex":
+                reason = codex_unavailable_reason(
+                    args.scope, REPO_ROOT, Path(args.codex_plugin)
+                ) or "codex plugin/script not found"
+            else:
+                reason = "minimax command not buildable"
             state["reviewer_attempts"].append(
                 {"reviewer": reviewer, "result": "unavailable",
-                 "reason": f"{reviewer} plugin/script not found"})
+                 "reason": reason})
             with log_path.open("a") as logf:
                 log_line(logf, f"[{utc_now_iso()}] REVIEWER_SKIP "
-                         f"reviewer={reviewer} reason=unavailable")
+                         f"reviewer={reviewer} reason={reason}")
             continue
         rc = run_one_reviewer(reviewer, cmd, job, log_path, state_path, state,
                               args.deadline, args.heartbeat_interval)
