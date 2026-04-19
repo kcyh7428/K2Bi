@@ -1,35 +1,48 @@
 #!/usr/bin/env bash
-# K2Bi commit-msg hook (ported from K2B Tier 1 fix #8).
+# K2Bi commit-msg hook.
 #
-# Check: status: line edits in wiki/concepts/feature_*.md require /ship
-# provenance (Co-Shipped-By: invest-ship trailer) OR K2BI_ALLOW_STATUS_EDIT=1.
+# Check 1 (existing, from Bundle 1 / K2B Tier 1 fix #8):
+#   status: line edits in wiki/concepts/feature_*.md require /ship
+#   provenance (Co-Shipped-By: k2b-ship|invest-ship trailer) OR
+#   K2BI_ALLOW_STATUS_EDIT=1.
 #
-# Runs as commit-msg (not pre-commit) because pre-commit cannot reliably
-# read the commit message file across git versions.
+# Check 2 (Bundle 3 cycle 4):
+#   status transitions in wiki/strategies/strategy_*.md must match the
+#   allowed matrix (spec §2.2) and the commit must include the three
+#   required trailers for the transition:
+#     Strategy-Transition: <old> -> <new>
+#     <Approved|Rejected|Retired>-Strategy: strategy_<slug>
+#     Co-Shipped-By: invest-ship
+#   Body-only edits (status unchanged) and draft creations
+#   ((new file) -> proposed) require no trailers. Override:
+#   K2BI_ALLOW_STRATEGY_STATUS_EDIT=1.
 #
-# NOTE (Phase 1): K2Bi does not yet have its own /ship workflow
-# or `wiki/concepts/feature_*.md` lane structure -- those land in a later
-# phase. Until then this hook is a no-op for K2Bi-Vault paths.
-# The check is wired up so once feature notes start landing, the discipline
-# is already enforced. The K2B repo trailer convention (Co-Shipped-By:
-# k2b-ship) is also accepted because /ship is reused cross-repo until an
-# invest-ship variant exists.
-#
-# TODO (Phase 2 milestone 2.17, strategy approval gate): when a commit
-# touches K2Bi-Vault/wiki/strategies/*.md AND flips any `status:` line
-# to `status: approved`, this hook must also verify that the "How This
-# Works (Plain English)" section exists and is non-empty (not the
-# template placeholder). This is the code-enforced half of the Teach
-# Mode pedagogical layer (Teach Mode gate is permanent regardless of
-# learning-stage dial). Implementation: grep the staged file for
-# "## How This Works (Plain English)" followed by at least one line
-# that is not whitespace, not a [bracketed] placeholder, and not the
-# template's MANDATORY-marker stub. Reject the commit if the section
-# is missing or placeholder-only. Proposal reference:
-# proposals/2026-04-18_teach-mode-pedagogical-layer.md (section D).
+# The Bundle-1 TODO about a "How This Works" check here has moved to
+# the pre-commit hook's Check B per architect spec §6 Q5. The two
+# checks are complementary: Check B runs on staged file contents
+# (pre-commit) while this hook runs on the commit message
+# (commit-msg); mixing file-content logic into commit-msg was the
+# wrong layer.
 
 set -euo pipefail
 MSG_FILE="$1"
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
+
+# Best-effort override logger -- mirrors pre-commit's _log_override so
+# every K2BI_ALLOW_*=1 escape on this hook leaves an auditable record
+# in wiki/log.md beyond stderr (which git does not capture).
+_log_override() {
+  local env_var="$1"
+  local detail="$2"
+  if [ -x "$REPO_ROOT/scripts/wiki-log-append.sh" ]; then
+    "$REPO_ROOT/scripts/wiki-log-append.sh" \
+      "hook-override" "$env_var" "$detail" >/dev/null 2>&1 || true
+  fi
+}
+
+# ---------- Check 1 -- feature_*.md status edit needs /ship trailer ----------
 
 STATUS_CHANGES=$(git diff --cached --unified=0 -- \
   'wiki/concepts/feature_*.md' \
@@ -41,17 +54,135 @@ STATUS_CHANGES=$(git diff --cached --unified=0 -- \
 if [ -n "$STATUS_CHANGES" ]; then
   if ! grep -qE '^Co-Shipped-By: (k2b-ship|invest-ship)' "$MSG_FILE"; then
     if [ "${K2BI_ALLOW_STATUS_EDIT:-}" != "1" ]; then
-      echo "error: status: line modified in wiki/concepts/feature_*.md outside /ship"
-      echo ""
-      echo "Changed status lines:"
-      echo "$STATUS_CHANGES"
-      echo ""
-      echo "Use /ship to transition feature status."
-      echo "Override (one-off repairs only): K2BI_ALLOW_STATUS_EDIT=1 git commit ..."
+      echo "error: status: line modified in wiki/concepts/feature_*.md outside /ship" >&2
+      echo "" >&2
+      echo "Changed status lines:" >&2
+      echo "$STATUS_CHANGES" >&2
+      echo "" >&2
+      echo "Use /ship to transition feature status." >&2
+      echo "Override (one-off repairs only): K2BI_ALLOW_STATUS_EDIT=1 git commit ..." >&2
       exit 1
     fi
-    echo "warning: status: line edited outside /ship, K2BI_ALLOW_STATUS_EDIT override acknowledged"
+    echo "warning: status: line edited outside /ship, K2BI_ALLOW_STATUS_EDIT override acknowledged" >&2
+    _log_override "K2BI_ALLOW_STATUS_EDIT" "commit-msg feature status bypass"
   fi
 fi
+
+# ---------- Check 2 -- strategy file transition trailer enforcement ----------
+
+STRATEGY_OVERRIDE="${K2BI_ALLOW_STRATEGY_STATUS_EDIT:-}"
+FRONTMATTER="python3 -m scripts.lib.strategy_frontmatter"
+
+STRATEGY_FILES=$(
+  git diff --cached --name-only --diff-filter=d \
+    | grep -E '^wiki/strategies/strategy_[^/]+\.md$' \
+    || true
+)
+
+if [ -z "$STRATEGY_FILES" ]; then
+  exit 0
+fi
+
+if [ "$STRATEGY_OVERRIDE" = "1" ]; then
+  echo "warning: K2BI_ALLOW_STRATEGY_STATUS_EDIT=1 override acknowledged; skipping strategy-transition trailer enforcement" >&2
+  _log_override "K2BI_ALLOW_STRATEGY_STATUS_EDIT" "commit-msg strategy-transition bypass"
+  exit 0
+fi
+
+TMPDIR_CM=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_CM"' EXIT
+
+while IFS= read -r path; do
+  [ -z "$path" ] && continue
+  # printf instead of echo so any IFS characters in $path (never
+  # expected in our strategy-file glob, but defensive) cannot leak
+  # into the tr pipeline's token expansion.
+  safe_name="$(printf '%s' "$path" | tr '/.' '__')"
+  staged_file="$TMPDIR_CM/staged__${safe_name}"
+  head_file="$TMPDIR_CM/head__${safe_name}"
+  git show ":0:$path" > "$staged_file"
+  if git cat-file -e "HEAD:$path" 2>/dev/null; then
+    git show "HEAD:$path" > "$head_file"
+  else
+    : > "$head_file"
+  fi
+
+  # validate-transition prints "old\tnew" on stdout regardless of
+  # exit code; 0 = allowed or body-only; 1 = forbidden; 2 = parse.
+  out_file="$TMPDIR_CM/tr_out"
+  err_file="$TMPDIR_CM/tr_err"
+  set +e
+  ${FRONTMATTER} validate-transition \
+    --head "$head_file" --staged "$staged_file" \
+    > "$out_file" 2> "$err_file"
+  rc=$?
+  set -e
+  IFS=$'\t' read -r old_status new_status < "$out_file" || true
+  old_status="${old_status:-(new file)}"
+  new_status="${new_status:-(new file)}"
+
+  if [ "$rc" -ne 0 ]; then
+    echo "error: $path (commit-msg strategy transition):" >&2
+    cat "$err_file" >&2
+    exit 1
+  fi
+
+  # Body-only edit: same status, no trailer required. Pre-commit
+  # Check D owns whether the body edit is itself legal.
+  if [ "$old_status" = "$new_status" ]; then
+    continue
+  fi
+
+  # (new file) -> proposed: draft creation, no trailers required.
+  if [ "$old_status" = "(new file)" ] && [ "$new_status" = "proposed" ]; then
+    continue
+  fi
+
+  # Any remaining transition lands in {approved, rejected, retired}
+  # (forbidden transitions already exited above via rc=1). Slug is
+  # derived through the shared helper so hook + engine always agree
+  # (parity covered by tests/test_strategy_frontmatter).
+  slug=$(${FRONTMATTER} retire-slug "$path")
+
+  # Trailer 1: Strategy-Transition must match the actual transition.
+  # `grep -qFx` matches the line exactly so a stale copy-paste of a
+  # different transition is caught.
+  expected_trans="Strategy-Transition: ${old_status} -> ${new_status}"
+  if ! grep -qFx "$expected_trans" "$MSG_FILE"; then
+    echo "error: $path: commit message missing required trailer:" >&2
+    echo "  $expected_trans" >&2
+    echo "" >&2
+    echo "The file's staged status transition (${old_status} -> ${new_status}) must be declared via the Strategy-Transition trailer on its own line. Override (emergency only): K2BI_ALLOW_STRATEGY_STATUS_EDIT=1 git commit ..." >&2
+    exit 1
+  fi
+
+  # Trailer 2: Action-Strategy (direction-specific).
+  case "$new_status" in
+    approved) action="Approved" ;;
+    rejected) action="Rejected" ;;
+    retired)  action="Retired"  ;;
+    *)
+      echo "error: $path: unexpected target status ${new_status}; this is a hook bug" >&2
+      exit 1
+      ;;
+  esac
+  expected_action="${action}-Strategy: strategy_${slug}"
+  if ! grep -qFx "$expected_action" "$MSG_FILE"; then
+    echo "error: $path: commit message missing required trailer:" >&2
+    echo "  $expected_action" >&2
+    echo "" >&2
+    echo "Every strategy ${new_status} commit must name the strategy via the ${action}-Strategy trailer so the audit trail is grep-able." >&2
+    exit 1
+  fi
+
+  # Trailer 3: Co-Shipped-By: invest-ship.
+  if ! grep -qE '^Co-Shipped-By: invest-ship[[:space:]]*$' "$MSG_FILE"; then
+    echo "error: $path: commit message missing required trailer:" >&2
+    echo "  Co-Shipped-By: invest-ship" >&2
+    echo "" >&2
+    echo "Strategy transitions must originate from /invest-ship (the one-writer rule -- spec §4.2)." >&2
+    exit 1
+  fi
+done <<< "$STRATEGY_FILES"
 
 exit 0

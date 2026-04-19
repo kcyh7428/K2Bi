@@ -1,30 +1,218 @@
 #!/usr/bin/env bash
-# K2Bi pre-commit hook (ported from K2B Tier 1 fix #2 + #8).
+# K2Bi pre-commit hook.
 #
-# Check 1: block direct >> wiki/log.md append.
-#   Single writer is scripts/wiki-log-append.sh.
-#   Override: K2BI_ALLOW_LOG_APPEND=1
+# Checks:
+#   1. Block direct `>> wiki/log.md` append (ported from K2B Tier 1 fix #2 + #8).
+#      Override: K2BI_ALLOW_LOG_APPEND=1
 #
-# (commit-msg hook handles the status: edit guard for feature_*.md, since
-# pre-commit cannot reliably read the commit message file across git versions.
-# See .githooks/commit-msg.)
+# Bundle 3 cycle 4 -- strategy + config approval discipline:
+#   A. Status-in-enum on every staged wiki/strategies/strategy_*.md.
+#   B. `## How This Works` non-empty when status is proposed OR approved.
+#   C. execution/validators/config.yaml edit requires a same-commit
+#      proposed->approved limits-proposal transition in the staged diff.
+#   D. Approved strategies are content-immutable except for the pure
+#      retire transition (`status: approved` -> `status: retired` +
+#      add retired_at + retired_reason; body + other frontmatter fields
+#      byte-identical).
+#
+# Overrides (emergency / hook-repair only):
+#   K2BI_ALLOW_STRATEGY_STATUS_EDIT=1 -> bypass Checks A/B/D
+#   K2BI_ALLOW_CONFIG_EDIT=1          -> bypass Check C
+# Overrides log a warning to stderr so commits that use them are
+# obvious in the audit trail.
+#
+# All frontmatter parsing + transition logic is centralised in
+# scripts/lib/strategy_frontmatter.py (Bundle 3 cycle 4 shared helper).
 
 set -euo pipefail
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}"
+
+# Best-effort override logger. Writes an entry to wiki/log.md via the
+# single-writer helper so every override use leaves an auditable
+# record beyond stderr (which git does not capture into the commit).
+# Silent on failure so a missing helper or missing log file does not
+# break the hook itself -- the stderr warning still fires either way.
+_log_override() {
+  local env_var="$1"
+  local detail="$2"
+  if [ -x "$REPO_ROOT/scripts/wiki-log-append.sh" ]; then
+    "$REPO_ROOT/scripts/wiki-log-append.sh" \
+      "hook-override" "$env_var" "$detail" >/dev/null 2>&1 || true
+  fi
+}
+
+# ---------- Check 1: block direct >> wiki/log.md ----------
 
 LOG_DIRECT=$(git diff --cached | grep -E '^\+.*>>[[:space:]]*\S*wiki/log\.md' || true)
 if [ -n "$LOG_DIRECT" ]; then
   if [ "${K2BI_ALLOW_LOG_APPEND:-}" = "1" ]; then
-    echo "warning: direct >> wiki/log.md append, K2BI_ALLOW_LOG_APPEND override acknowledged"
-    exit 0
+    echo "warning: direct >> wiki/log.md append, K2BI_ALLOW_LOG_APPEND override acknowledged" >&2
+    _log_override "K2BI_ALLOW_LOG_APPEND" "pre-commit log-append bypass"
+  else
+    echo "error: direct >> append to wiki/log.md detected." >&2
+    echo "Use scripts/wiki-log-append.sh as the single writer." >&2
+    echo "" >&2
+    echo "Offending lines:" >&2
+    echo "$LOG_DIRECT" >&2
+    echo "" >&2
+    echo "Override (rewriting the helper itself only): K2BI_ALLOW_LOG_APPEND=1 git commit ..." >&2
+    exit 1
   fi
-  echo "error: direct >> append to wiki/log.md detected."
-  echo "Use scripts/wiki-log-append.sh as the single writer."
-  echo ""
-  echo "Offending lines:"
-  echo "$LOG_DIRECT"
-  echo ""
-  echo "Override (rewriting the helper itself only): K2BI_ALLOW_LOG_APPEND=1 git commit ..."
-  exit 1
+fi
+
+# ---------- Helpers for Bundle 3 cycle 4 checks ----------
+
+STRATEGY_OVERRIDE="${K2BI_ALLOW_STRATEGY_STATUS_EDIT:-}"
+CONFIG_OVERRIDE="${K2BI_ALLOW_CONFIG_EDIT:-}"
+FRONTMATTER="python3 -m scripts.lib.strategy_frontmatter"
+
+TMPDIR_HOOK=$(mktemp -d)
+trap 'rm -rf "$TMPDIR_HOOK"' EXIT
+
+# Dump staged state for a path into a tmp file. Returns the tmp file
+# name on stdout. Never fails; if the path is missing from the index
+# (deletion case) the caller shouldn't invoke this.
+_dump_staged() {
+  local path="$1"
+  local safe_name
+  safe_name="$(printf '%s' "$path" | tr '/.' '__')"
+  local out="$TMPDIR_HOOK/staged__${safe_name}"
+  git show ":0:$path" > "$out"
+  printf '%s' "$out"
+}
+
+# Dump HEAD state for a path into a tmp file. An empty file is
+# written when HEAD does not contain the path; callers that care
+# distinguish via `test -s` / the helper's bytes-empty parse.
+_dump_head() {
+  local path="$1"
+  local safe_name
+  safe_name="$(printf '%s' "$path" | tr '/.' '__')"
+  local out="$TMPDIR_HOOK/head__${safe_name}"
+  if git cat-file -e "HEAD:$path" 2>/dev/null; then
+    git show "HEAD:$path" > "$out"
+  else
+    : > "$out"
+  fi
+  printf '%s' "$out"
+}
+
+# ---------- Enumerate staged strategy files ----------
+
+# `--diff-filter=d` means "not Deleted"; we want Added + Modified +
+# Copied + Renamed + Typechanged. Deleted strategy files are allowed
+# to pass pre-commit (the transition matrix does not cover deletion).
+STRATEGY_FILES=$(
+  git diff --cached --name-only --diff-filter=d \
+    | grep -E '^wiki/strategies/strategy_[^/]+\.md$' \
+    || true
+)
+
+if [ -n "$STRATEGY_FILES" ]; then
+  if [ "$STRATEGY_OVERRIDE" = "1" ]; then
+    echo "warning: K2BI_ALLOW_STRATEGY_STATUS_EDIT=1 override acknowledged; skipping Checks A/B/D for staged strategy files" >&2
+    _log_override "K2BI_ALLOW_STRATEGY_STATUS_EDIT" "pre-commit Checks A/B/D bypass"
+  else
+    while IFS= read -r path; do
+      [ -z "$path" ] && continue
+      staged_file=$(_dump_staged "$path")
+      head_file=$(_dump_head "$path")
+
+      # ---------- Check A -- status-in-enum ----------
+      if ! err=$(${FRONTMATTER} validate-status < "$staged_file" 2>&1); then
+        echo "error: $path (Check A -- status enum): $err" >&2
+        exit 1
+      fi
+
+      # Capture status for Check B conditional.
+      staged_status=$(${FRONTMATTER} status < "$staged_file" 2>/dev/null || true)
+
+      # ---------- Check B -- How This Works non-empty ----------
+      if [ "$staged_status" = "proposed" ] || [ "$staged_status" = "approved" ]; then
+        if ! ${FRONTMATTER} how-this-works < "$staged_file" >/dev/null 2>&1; then
+          echo "error: $path (Check B -- Teach Mode gate): missing or empty '## How This Works' section" >&2
+          echo "" >&2
+          echo "Keith's strategy spec must include a plain-English '## How This Works' body for status=proposed or status=approved (per CLAUDE.md Teach Mode permanent gate)." >&2
+          exit 1
+        fi
+      fi
+
+      # ---------- Check D -- approved content immutability ----------
+      if ! err=$(${FRONTMATTER} check-approved-immutable \
+            --head "$head_file" --staged "$staged_file" 2>&1); then
+        echo "error: $path (Check D -- approved immutability): $err" >&2
+        exit 1
+      fi
+    done <<< "$STRATEGY_FILES"
+  fi
+fi
+
+# ---------- Check C -- config.yaml requires matching limits-proposal ----------
+
+CONFIG_STAGED=$(
+  git diff --cached --name-only --diff-filter=d \
+    | grep -Fx 'execution/validators/config.yaml' \
+    || true
+)
+
+if [ -n "$CONFIG_STAGED" ]; then
+  if [ "$CONFIG_OVERRIDE" = "1" ]; then
+    echo "warning: K2BI_ALLOW_CONFIG_EDIT=1 override acknowledged; skipping Check C for execution/validators/config.yaml" >&2
+    _log_override "K2BI_ALLOW_CONFIG_EDIT" "pre-commit Check C bypass"
+  else
+    LIMITS_PROPOSALS=$(
+      git diff --cached --name-only --diff-filter=d \
+        | grep -E '^review/strategy-approvals/.*_limits-proposal_.*\.md$' \
+        || true
+    )
+    if [ -z "$LIMITS_PROPOSALS" ]; then
+      echo "error: execution/validators/config.yaml edited without a matching staged limits-proposal (Check C)." >&2
+      echo "" >&2
+      echo "Config changes must come through /invest-ship --approve-limits, which stages both the proposal (status: proposed -> approved) and the config.yaml edit in the same commit." >&2
+      echo "" >&2
+      echo "Override (emergency rollback only): K2BI_ALLOW_CONFIG_EDIT=1 git commit ..." >&2
+      exit 1
+    fi
+
+    found_valid=""
+    while IFS= read -r ppath; do
+      [ -z "$ppath" ] && continue
+      pstaged=$(_dump_staged "$ppath")
+      phead=$(_dump_head "$ppath")
+
+      ps_status=$(${FRONTMATTER} status < "$pstaged" 2>/dev/null || true)
+      if [ "$ps_status" != "approved" ]; then
+        continue
+      fi
+      # HEAD must have `status: proposed`. A missing HEAD file (new
+      # file at HEAD) means the proposal has no proposed predecessor
+      # in git history -- that's the forged-approved-new-file case
+      # (spec §4.1 Check C step 3 / §8.2 row 20); reject it by
+      # continuing past this proposal.
+      if [ ! -s "$phead" ]; then
+        continue
+      fi
+      ph_status=$(${FRONTMATTER} status < "$phead" 2>/dev/null || true)
+      if [ "$ph_status" = "proposed" ]; then
+        found_valid="$ppath"
+        break
+      fi
+    done <<< "$LIMITS_PROPOSALS"
+
+    if [ -z "$found_valid" ]; then
+      echo "error: execution/validators/config.yaml edit requires a same-commit limits-proposal with status transition proposed -> approved (Check C)." >&2
+      echo "" >&2
+      echo "Found staged proposals:" >&2
+      echo "$LIMITS_PROPOSALS" >&2
+      echo "" >&2
+      echo "Each proposal must have HEAD status=proposed AND staged status=approved. Any proposal that was already approved in a prior commit, or was created new at approved directly, is rejected (status transition must be atomic with the config edit)." >&2
+      echo "" >&2
+      echo "Override (emergency rollback only): K2BI_ALLOW_CONFIG_EDIT=1 git commit ..." >&2
+      exit 1
+    fi
+  fi
 fi
 
 exit 0

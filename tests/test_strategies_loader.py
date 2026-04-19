@@ -11,8 +11,11 @@ from pathlib import Path
 
 from execution.strategies import loader
 from execution.strategies.types import (
+    ALLOWED_STATUSES,
     STATUS_APPROVED,
     STATUS_PROPOSED,
+    STATUS_REJECTED,
+    STATUS_RETIRED,
     STRATEGY_TYPE_HAND_CRAFTED,
     StrategyFileModifiedError,
     StrategyLoaderError,
@@ -123,6 +126,28 @@ class LoadDocumentTests(unittest.TestCase):
             with self.assertRaises(StrategyLoaderError) as cm:
                 loader.load_document(path)
             self.assertIn("status", str(cm.exception))
+
+    def test_rejected_status_parses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = _write_strategy(
+                Path(tmp),
+                "bad-draft",
+                status=STATUS_REJECTED,
+                approved_at=None,
+                approved_commit_sha=None,
+            )
+            doc = loader.load_document(path)
+            self.assertEqual(doc.status, STATUS_REJECTED)
+
+    def test_rejected_status_in_allowed_set(self):
+        self.assertIn(STATUS_REJECTED, ALLOWED_STATUSES)
+        self.assertIn(STATUS_RETIRED, ALLOWED_STATUSES)
+        self.assertEqual(
+            ALLOWED_STATUSES,
+            frozenset(
+                {STATUS_PROPOSED, STATUS_APPROVED, STATUS_REJECTED, STATUS_RETIRED}
+            ),
+        )
 
     def test_missing_order_on_hand_crafted_raises(self):
         with tempfile.TemporaryDirectory() as tmp:

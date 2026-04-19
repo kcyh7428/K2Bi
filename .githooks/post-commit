@@ -1,0 +1,273 @@
+#!/usr/bin/env python3
+"""K2Bi post-commit hook -- retire sentinel landing (Bundle 3 cycle 4).
+
+Closes the orphaned-sentinel race Q10 flagged: sentinels exist only
+when the retire commit actually lands. On any commit-abort path the
+hook never runs, so `.retired-<sha16>` is absent and the engine's
+submit path still sees a healthy `status: approved` file.
+
+Flow:
+
+1. If `K2BI_SKIP_POST_COMMIT_RETIRE=1`, exit 0 silently (used by
+   the test harness + manual hook-repair workflows).
+2. Read the just-landed commit message via `git log -1 --format=%B`.
+   Exit 0 if no `Retired-Strategy: strategy_<slug>` trailer is
+   present (this commit is not a retire).
+3. For every file in `git diff-tree --no-commit-id --name-only -r HEAD`
+   that matches `wiki/strategies/strategy_*.md`:
+   a. Read the file at HEAD (already landed) via `git show HEAD:<path>`.
+   b. Parse its frontmatter; if `status` isn't `retired`, skip.
+   c. Derive the slug via `execution.engine.main.derive_retire_slug`
+      (strips the `strategy_` prefix). This is the same derivation
+      the engine runs on every submit tick -- parity is the whole
+      point.
+   d. Call `execution.risk.kill_switch.write_retired(slug, reason,
+      commit_sha)` with the base dir resolved via
+      `resolve_retired_dir` honoring `K2BI_RETIRED_DIR` in tests.
+   e. First-writer-wins: write_retired returns None if a sentinel
+      was already present (e.g. `git commit --amend` re-firing).
+      That's not a failure.
+4. Log any unexpected exception to stderr and (best-effort) to
+   `scripts/wiki-log-append.sh`. The commit is already durable so
+   we always exit 0 (the post-commit hook API does not fail commits).
+
+Design decisions carried in from cycle 4 defensive design decisions:
+
+- File enumeration uses `git diff-tree`, NOT the trailer's slug
+  portion, because trailer text is a human-readable hint whose
+  relationship to the actual filename can drift.
+- Slug derivation uses `derive_retire_slug` instead of any local
+  re-implementation; it's the canonical hook/engine parity seam.
+- The sentinel-dir resolver is shared with the engine; both honor
+  `K2BI_RETIRED_DIR` override if present, else fall back to
+  `DEFAULT_RETIRED_DIR`.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import subprocess
+import sys
+import traceback
+from pathlib import Path
+
+
+def _repo_root() -> Path:
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return Path(result.stdout.strip())
+
+
+REPO_ROOT = _repo_root()
+# Make the shared helper + execution packages importable when the
+# hook runs from .git's hook driver (which does not set PYTHONPATH).
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from execution.engine.main import derive_retire_slug  # noqa: E402
+from execution.risk.kill_switch import (  # noqa: E402
+    DEFAULT_RETIRED_DIR,
+    resolve_retired_dir,
+    write_retired,
+)
+from execution.validators.config import load_config  # noqa: E402
+from scripts.lib.strategy_frontmatter import (  # noqa: E402
+    extract_status,
+    parse as parse_frontmatter,
+)
+
+
+RETIRED_TRAILER_RE = re.compile(
+    r"^Retired-Strategy:\s*strategy_[^\s]+\s*$", re.MULTILINE
+)
+STRATEGY_PATH_RE = re.compile(r"^wiki/strategies/strategy_[^/]+\.md$")
+
+
+def _git(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", *args], capture_output=True, text=True, check=False
+    )
+
+
+def _log_stderr(msg: str) -> None:
+    print(f"[post-commit] {msg}", file=sys.stderr)
+
+
+def _log_wiki(event: str, detail: str) -> None:
+    """Best-effort append to the wiki/log.md via the single-writer
+    helper. Silent on failure -- we never raise from here."""
+    helper = REPO_ROOT / "scripts" / "wiki-log-append.sh"
+    if not helper.exists():
+        return
+    try:
+        subprocess.run(
+            [str(helper), event, detail],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except Exception:  # noqa: BLE001 -- deliberate: never raise here
+        pass
+
+
+def _resolve_retired_dir() -> Path:
+    """Resolve the sentinel directory with the same precedence the
+    engine uses at submit time. Codex R1 P0: the engine reads
+    ``engine.retired_dir`` / ``engine.kill_path`` from
+    ``execution/validators/config.yaml`` on startup (see
+    ``execution.engine.main._engine_config_from_dict`` and
+    ``Engine._retired_dir``). The post-commit hook must honour the
+    same values; otherwise a deployment that remaps the sentinel
+    path (e.g. Mac Mini deploy with vault-side paths diverging from
+    the MacBook layout) writes to one directory while the engine
+    reads from another, and the retirement gate silently stays open.
+
+    Precedence:
+
+    1. ``K2BI_RETIRED_DIR`` env override -- test-scope only; lets
+       the hook harness isolate sentinel writes to a tmp dir
+       without authoring a config.yaml every test.
+    2. ``engine.retired_dir`` from config.yaml (if present).
+    3. ``engine.kill_path`` from config.yaml (``resolve_retired_dir``
+       walks kill_path.parent, matching ``.killed`` placement).
+    4. ``DEFAULT_RETIRED_DIR`` (vault-side fallback).
+    """
+    override = os.environ.get("K2BI_RETIRED_DIR")
+    if override:
+        return Path(override)
+
+    retired_dir: Path | None = None
+    kill_path: Path | None = None
+    cfg_path = REPO_ROOT / "execution" / "validators" / "config.yaml"
+    if cfg_path.exists():
+        try:
+            raw = load_config(cfg_path)
+        except Exception as exc:  # noqa: BLE001 -- log + continue
+            # MiniMax R5 F2: parse failure here means the hook cannot
+            # see the same config the engine's _retired_dir() sees.
+            # Both stderr AND wiki-log record the mismatch so it
+            # leaves a durable audit trail, not just an ephemeral
+            # stderr line git may swallow.
+            _log_stderr(
+                f"warning: could not parse {cfg_path} ({exc}); "
+                "falling back to default retired_dir -- engine may "
+                "read sentinels from a different path than this hook writes"
+            )
+            _log_wiki(
+                "post_commit_config_parse_failed",
+                f"{cfg_path}: {type(exc).__name__}: {exc}",
+            )
+            raw = {}
+        engine_cfg = raw.get("engine", {}) if isinstance(raw, dict) else {}
+        if isinstance(engine_cfg, dict):
+            rd = engine_cfg.get("retired_dir")
+            if rd:
+                retired_dir = Path(str(rd)).expanduser()
+            kp = engine_cfg.get("kill_path")
+            if kp:
+                kill_path = Path(str(kp)).expanduser()
+    # resolve_retired_dir() applies the canonical engine precedence:
+    # explicit retired_dir > kill_path.parent > DEFAULT_RETIRED_DIR.
+    # The hook + engine share this single resolver so the two sides
+    # never disagree on precedence semantics.
+    return resolve_retired_dir(retired_dir, kill_path)
+
+
+def _commit_message() -> str:
+    result = _git("log", "-1", "--format=%B")
+    if result.returncode != 0:
+        return ""
+    return result.stdout
+
+
+def _commit_sha() -> str:
+    result = _git("rev-parse", "HEAD")
+    if result.returncode != 0:
+        return ""
+    return result.stdout.strip()
+
+
+def _changed_strategy_paths() -> list[str]:
+    result = _git(
+        "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"
+    )
+    if result.returncode != 0:
+        return []
+    return [
+        p for p in result.stdout.splitlines() if STRATEGY_PATH_RE.match(p)
+    ]
+
+
+def _file_at_head(path: str) -> bytes:
+    result = _git("show", f"HEAD:{path}")
+    if result.returncode != 0:
+        return b""
+    return result.stdout.encode("utf-8")
+
+
+def main() -> int:
+    if os.environ.get("K2BI_SKIP_POST_COMMIT_RETIRE") == "1":
+        return 0
+
+    message = _commit_message()
+    if not RETIRED_TRAILER_RE.search(message):
+        # Not a retire commit. Nothing to do.
+        return 0
+
+    commit_sha = _commit_sha()
+    retired_dir = _resolve_retired_dir()
+    retired_dir.mkdir(parents=True, exist_ok=True)
+
+    landed: list[tuple[str, Path]] = []
+    for path in _changed_strategy_paths():
+        content = _file_at_head(path)
+        if not content:
+            continue
+        try:
+            fm = parse_frontmatter(content)
+        except ValueError as exc:
+            _log_stderr(f"{path}: frontmatter parse failed ({exc}); skipping")
+            continue
+        if extract_status(fm) != "retired":
+            continue
+        slug = derive_retire_slug(path)
+        reason = str(fm.get("retired_reason") or "").strip()
+        if not reason:
+            reason = "(no retired_reason field)"
+        try:
+            sentinel = write_retired(
+                slug=slug,
+                reason=reason,
+                commit_sha=commit_sha,
+                base_dir=retired_dir,
+            )
+        except Exception:  # noqa: BLE001 -- surface then continue
+            _log_stderr(
+                f"{path}: write_retired failed:\n{traceback.format_exc()}"
+            )
+            _log_wiki(
+                "retire_sentinel_write_failed",
+                f"{path} commit={commit_sha}",
+            )
+            continue
+        if sentinel is None:
+            # Another writer already placed the sentinel (concurrent
+            # retire, or `git commit --amend` re-firing the hook).
+            # First-writer-wins means the existing record is the
+            # authoritative one; this is not an error.
+            continue
+        landed.append((path, sentinel))
+
+    # Post-commit hooks cannot fail the commit (git ignores non-zero
+    # return from post-commit). Return 0 regardless so the commit
+    # stays clean even when sentinel land partially failed.
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

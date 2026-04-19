@@ -38,8 +38,11 @@ from typing import Any
 # Status values a strategy file can carry.
 STATUS_PROPOSED = "proposed"
 STATUS_APPROVED = "approved"
+STATUS_REJECTED = "rejected"
 STATUS_RETIRED = "retired"
-ALLOWED_STATUSES = frozenset({STATUS_PROPOSED, STATUS_APPROVED, STATUS_RETIRED})
+ALLOWED_STATUSES = frozenset(
+    {STATUS_PROPOSED, STATUS_APPROVED, STATUS_REJECTED, STATUS_RETIRED}
+)
 
 # Strategy types we know how to evaluate. Phase 2 ships hand_crafted
 # only; Phase 3 adds rule_based evaluators. Adding a new type is a
@@ -179,6 +182,7 @@ __all__ = [
     "MarketSnapshot",
     "STATUS_APPROVED",
     "STATUS_PROPOSED",
+    "STATUS_REJECTED",
     "STATUS_RETIRED",
     "STRATEGY_TYPE_HAND_CRAFTED",
     "StrategyDocument",
