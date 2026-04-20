@@ -3,6 +3,31 @@
 Session-by-session ship log. Append-only. New entries on top.
 
 
+## 2026-04-20 -- Session C: Phase 3.1 SPY smoke spec committed (proposed)
+
+**Commit:** `26a6f73` feat(strategy): propose spy-first-paper-smoke (status: proposed)
+
+**What shipped:** First K2Bi strategy spec lands at `wiki/strategies/strategy_spy-first-paper-smoke.md` with `status: proposed`. Pipeline smoke test for the approval + execution path, NOT a real rotational strategy. Order block: BUY 2 SPY limit 715.00, static stop_loss 697.13, DAY TIF. Bracket submission at IBKR with GTC stop child held broker-side; no overnight risk if parent does not fill same-session. Two targeted edits on top of the 4-round-Codex draft from the aborted prior session: (1) removed the Q30 bullet from "Open questions before approval" since Session B (`fed0273`) closed Q30 via approval-time atomic vault mirror; (2) removed the redundant regime_filter workflow commentary bullet (the design-decision bullet two lines above already captures "omitted by design"). The spec's claim that REQUIRED_STRATEGY_FIELDS includes `regime_filter` was verified against `scripts/lib/invest_ship_strategy.py:105`; the check only fires at approval time (`_validate_strategy_shape`, line 2148), not pre-commit, so the proposed file is legally committable without the field.
+
+**MiniMax review:** ONE plan-scope pass via `scripts/review.sh files --primary minimax` on the final draft, matching the review-discipline-split one-pass bucket for strategy spec files (NOT aggressive capital-path bucket). 5 findings surfaced, 0 actionable this session: (1) HIGH stop_loss precision mismatch 715 × 0.975 = 697.125 vs frontmatter 697.13 -- real arithmetic inconsistency, FLAGGED to architect but out of scope per kickoff Decision 1 (do NOT adjust the order block); (2) HIGH "Phase 2 cannot verify pipeline mechanics" -- FALSE POSITIVE, MiniMax had no Bundle 1/2 context; `execution/validators/trade_risk.py:43` carries exact `order.stop_loss is None` guard and `execution/connectors/ibkr.py` carries the bracket submission path; (3) HIGH SPY thesis missing -- intended Phase 3.2 state, the draft itself flags it as the first open question; (4) MEDIUM manual-intervention guard -- partially incorrect, Q31 `protective_stop_price_drift` invariant (shipped Session A at `ba9fc99`) catches the drifted-stop case at recovery; (5) MEDIUM static-stop limitation -- already flagged in the spec as Phase 4+ work. No iterative round needed.
+
+**Codex review:** Skipped. Review-discipline-split one-pass bucket for non-capital-path surfaces; the 4 prior Codex rounds on the draft in the aborted prior session (archived at `.code-reviews/2026-04-20T01-56-25Z_dabdd5.log` through `02-37-00Z_bb554f.log`) covered design surface at depth. MiniMax surfaced no findings beyond what those rounds already resolved.
+
+**Feature status change:** Phase 3.1 milestone SHIPPED (architect updates `milestones.md` from the K2B side per kickoff; Session C does NOT edit planning files). Phase 3.2 is now the next ritual: `/invest thesis SPY` (create thesis at `wiki/tickers/SPY.md`), then `/invest bear SPY`, then `/invest backtest spy-first-paper-smoke`, then `/invest-ship --approve-strategy spy-first-paper-smoke`. The approval path will now find its gate artifacts via `resolve_vault_root` (Session B) and post-commit will atomically mirror the approved file into the vault.
+
+**Tests:** Baseline 932 passed held at HEAD `d8384cc`; this commit touched only `wiki/strategies/strategy_spy-first-paper-smoke.md` (76-line addition, zero code changes), so delta = 0. Full suite re-run verifies no regressions.
+
+**Post-commit mirror verification:** Commit trailer `Strategy-Transition: (new file) -> proposed` does NOT match `MIRROR_TRAILER_RE` (which gates on `proposed -> approved` or `approved -> retired`). `~/Projects/K2Bi-Vault/wiki/strategies/` confirmed unchanged with only `index.md` present -- mirror phase correctly did not fire for a draft creation. Vault gets the file when `/invest-ship --approve-strategy` transitions it to `approved` in Phase 3.2.
+
+**Key decisions (divergent from claude.ai project specs):** Review discipline stayed LIGHT per the 2026-04-20 split -- strategy spec files are in the one-pass bucket. The kickoff's Decision 1 ("Do NOT re-author the draft") blocked the MiniMax-surfaced 697.125 vs 697.13 arithmetic fix; flagged to architect as separate observation rather than unilaterally edited. The kickoff's Decision 2 (approval is Phase 3.2, separate ritual) blocked any urge to run `/invest thesis SPY` in-session. Draft committed via plain `git add` + `git commit` (not via `/invest-ship`, which has no "commit a proposed spec" subcommand; `--approve-strategy` and `--reject-strategy` are the only transitions it handles).
+
+**Follow-ups:**
+- Phase 3.2 (next session): `/invest thesis SPY` -> `/invest bear SPY` -> `/invest backtest spy-first-paper-smoke` -> `/invest-ship --approve-strategy spy-first-paper-smoke`. This is the first end-to-end exercise of the full Bundle 4a approval-gate stack (thesis gate + bear-case gate + backtest-capture gate + Session B atomic mirror).
+- Architect observation: stop_loss precision. Body prose states `stop_loss = limit_price * 0.975`, which on 715.00 yields exactly 697.125. Frontmatter carries 697.13. Recommend either (a) flip frontmatter to 697.125 to match the formula, or (b) amend the body prose to state "0.975 × 715.00 = 697.125, rounded to cent = 697.13". Decision belongs to Keith. Low risk at Phase 3.1 smoke-test scope but will matter when dynamic stop computation lands in Phase 4+.
+- Architect observation: the spec's "IB Gateway manual-modification risk" paragraph (Risk Envelope line 69) does not currently mention the Q31 `protective_stop_price_drift` invariant that IS the technical guard Session A shipped at `ba9fc99`. Adding a parenthetical would calibrate the constraint as "recovery refuses to adopt a position with a drifted stop" rather than pure operator discipline. Out of scope per Decision 1; flagged.
+
+---
+
 ## 2026-04-20 -- Session B: Q30 approval-time atomic vault mirror
 
 **Commit:** `fed0273` feat(invest-ship): Q30 approval-time atomic vault mirror
