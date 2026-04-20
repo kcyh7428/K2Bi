@@ -16,6 +16,16 @@ Conventions:
   wrapper so tests express intent instead of plumbing.
 - `write_strategy(repo, slug, **kw)` authors a strategy file under
   `wiki/strategies/strategy_<slug>.md` matching spec §2.1.
+
+os.environ isolation scope (MiniMax R1 #5): `hook_repo()` snapshots +
+restores only three `K2BI_*` env keys -- `K2BI_VAULT_ROOT`,
+`K2BI_RETIRED_DIR`, `K2BI_KILL_PATH`. If a future test adds another
+`K2BI_*` variable that in-process handlers read (e.g. a new skip flag
+or a log path), that variable will NOT be auto-restored; tests that
+set it must also clean up in their own tearDown. The suite currently
+runs serially so broader snapshotting is not required; a move to
+pytest-xdist would warrant widening the snapshot to every
+`K2BI_*` key.
 """
 
 from __future__ import annotations
@@ -41,6 +51,11 @@ def _env_with(extra: dict[str, str] | None = None) -> dict[str, str]:
     # Same story for the kill-path override; keep tests isolated from
     # any outer CI env that may have it set.
     env.pop("K2BI_KILL_PATH", None)
+    # Q30 Session B: post-commit mirror phase + handle_approve_strategy
+    # resolve the vault via K2BI_VAULT_ROOT. Clear any inherited value
+    # so `hook_repo()` below can pin a per-test path without inherited
+    # state bleeding in from the host env.
+    env.pop("K2BI_VAULT_ROOT", None)
     if extra:
         env.update(extra)
     return env
@@ -74,6 +89,30 @@ def hook_repo(*, extra_env: dict[str, str] | None = None):
         retired_dir = tmp / "System"
         retired_dir.mkdir()
         env["K2BI_RETIRED_DIR"] = str(retired_dir)
+        # Q30 Session B: the post-commit mirror phase writes into
+        # `<K2BI_VAULT_ROOT>/wiki/strategies/`. For the default harness
+        # the tmp repo IS the vault (bear-case + backtest seeds live
+        # inside `tmp/wiki/` too), so the mirror becomes a same-file
+        # idempotent overwrite -- safe no-op. Tests that want to assert
+        # the mirror destination is distinct from the source override
+        # via `extra_env={"K2BI_VAULT_ROOT": str(<other dir>)}`. Caller
+        # wins because `_env_with(extra_env)` applies extras last.
+        env.setdefault("K2BI_VAULT_ROOT", str(tmp))
+        # Mirror the env into os.environ so in-process handlers that
+        # read the env via `resolve_vault_root()` see the tmp vault. The
+        # subprocess `env=` kwarg only covers child processes; helpers
+        # called directly from the test body (e.g.
+        # `iss.handle_approve_strategy(path)` in test_invest_ship_
+        # integration) run in THIS process and hit `os.environ`. We
+        # snapshot the original values + restore on exit so concurrent
+        # tests in the same runner do not cross-pollute.
+        _os_env_snapshot: dict[str, str | None] = {
+            key: os.environ.get(key)
+            for key in ("K2BI_VAULT_ROOT", "K2BI_RETIRED_DIR", "K2BI_KILL_PATH")
+        }
+        os.environ["K2BI_VAULT_ROOT"] = env["K2BI_VAULT_ROOT"]
+        os.environ["K2BI_RETIRED_DIR"] = env["K2BI_RETIRED_DIR"]
+        os.environ.pop("K2BI_KILL_PATH", None)
 
         run_git(tmp, "init", "-q", "-b", "main", env=env, check=True)
         run_git(tmp, "config", "user.email", "test@test.test", env=env, check=True)
@@ -104,7 +143,18 @@ def hook_repo(*, extra_env: dict[str, str] | None = None):
         except OSError:
             shutil.copy2(src_log_helper, scripts_dir / "wiki-log-append.sh")
 
-        yield tmp, env
+        try:
+            yield tmp, env
+        finally:
+            # Restore any os.environ values we shadowed so cross-test
+            # isolation holds. This includes putting back the original
+            # value (if any) OR deleting the key entirely (if it was
+            # absent before the context manager entered).
+            for key, prior in _os_env_snapshot.items():
+                if prior is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = prior
 
 
 def write_file(repo: Path, rel: str, content: str | bytes) -> Path:

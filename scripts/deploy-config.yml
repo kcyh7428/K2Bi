@@ -72,6 +72,14 @@ excludes:
   - .sync-state
   # Vault is Syncthing-managed, not rsync-managed
   - K2Bi-Vault
+  # Code repo wiki/ is the authorial source of truth for strategy + thesis specs:
+  # git-tracked (required for approved_commit_sha + Codex review + pre-commit hook
+  # enforcement). The engine's runtime read path is K2Bi-Vault/wiki/ via Syncthing;
+  # the .githooks/post-commit mirror phase (Q30, closed Session B) atomically
+  # mirrors approved + retired strategy files to the vault at commit time, so the
+  # rsync deploy does not need to carry wiki/ (Syncthing + the post-commit mirror
+  # are the authoritative propagation paths).
+  - wiki
   # Design docs + research workspace (MacBook dev tier only)
   - proposals
   - plans

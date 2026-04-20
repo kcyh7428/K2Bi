@@ -235,6 +235,7 @@ class MissingBacktestTests(BacktestGateBase):
                 parent_sha=self.sha,
                 now=self.now,
                 today=self.today,
+                vault_root=self.repo,
             )
         self.assertIn("no backtest found", str(cm.exception))
         self.assertIn(self.slug, str(cm.exception))
@@ -260,6 +261,7 @@ class SuspiciousNoOverrideTests(BacktestGateBase):
                 parent_sha=self.sha,
                 now=self.now,
                 today=self.today,
+                vault_root=self.repo,
             )
         msg = str(cm.exception)
         self.assertIn("suspicious", msg)
@@ -283,6 +285,7 @@ class MalformedCaptureTests(BacktestGateBase):
                 parent_sha=self.sha,
                 now=self.now,
                 today=self.today,
+                vault_root=self.repo,
             )
         self.assertIn("unparseable", str(cm.exception))
 
@@ -300,6 +303,7 @@ class AllEmptyCapturesTests(BacktestGateBase):
                 parent_sha=self.sha,
                 now=self.now,
                 today=self.today,
+                vault_root=self.repo,
             )
         self.assertIn("all are empty", str(cm.exception))
 
@@ -323,6 +327,7 @@ class BothGatesPassTests(BacktestGateBase):
             parent_sha=self.sha,
             now=self.now,
             today=self.today,
+            vault_root=self.repo,
         )
         # Status flipped to approved.
         fm = sf.parse(path.read_bytes())
@@ -352,6 +357,7 @@ class SuspiciousWithOverrideProceedsTests(BacktestGateBase):
             parent_sha=self.sha,
             now=self.now,
             today=self.today,
+            vault_root=self.repo,
         )
         fm = sf.parse(path.read_bytes())
         self.assertEqual(sf.extract_status(fm), "approved")
@@ -399,6 +405,7 @@ class GateOrderingTests(BacktestGateBase):
                 parent_sha=self.sha,
                 now=self.now,
                 today=self.today,
+                vault_root=self.repo,
             )
         msg = str(cm.exception)
         # Bear-case STALE message should surface -- NOT the backtest

@@ -154,6 +154,357 @@ VALID_CHANGE_TYPES = frozenset({"widen", "tighten", "add", "remove"})
 # --config-path; prod runs against the shipped one.
 DEFAULT_CONFIG_YAML = Path("execution") / "validators" / "config.yaml"
 
+# Q30 Session B -- Decision 3: the vault root is a deployment fact, not
+# a repo-relative one. The code repo lives at ~/Projects/K2Bi and the
+# Syncthing-managed vault lives at ~/Projects/K2Bi-Vault; the engine's
+# runtime read path targets the vault, while /invest-ship writes to the
+# code repo (git-tracked, where hooks fire + approved_commit_sha means
+# something). `DEFAULT_VAULT_ROOT` names the vault as a hardcoded Path
+# so consumers stop deriving it from `strategy_path.resolve().parents[2]`
+# (the old auto-detect resolved to the REPO on code-repo strategy files
+# -- the root of the Q30 split-brain). `K2BI_VAULT_ROOT` env overrides
+# for test isolation + deploy flexibility (Mac Mini path remap, CI). A
+# future vault rename needs to flip this constant AND
+# `ResolveVaultRootPrecedence.test_default_points_at_expected_vault_path`
+# so the mismatch surfaces at CI instead of in a silently-skipped mirror.
+#
+# Defensive HOME handling (MiniMax R1 #1): `Path.home()` raises
+# `RuntimeError` when HOME is unset AND pwd lookup fails -- a rare
+# container/CI edge case. Rather than letting an import-time failure
+# here crash every consumer of this module (which would crash the
+# post-commit hook, blocking both mirror + sentinel phases), fall back
+# to a clearly-broken sentinel path. The `.exists()` guards in
+# `resolve_vault_root` / `mirror_strategy_to_vault` / pre-flight then
+# surface the misconfiguration with a readable message instead of a
+# RuntimeError thousands of frames away.
+try:
+    DEFAULT_VAULT_ROOT = Path.home() / "Projects" / "K2Bi-Vault"
+except RuntimeError:
+    DEFAULT_VAULT_ROOT = Path("/nonexistent/HOME-unset/K2Bi-Vault")
+
+# Q30 Session B -- trailer regex single source of truth. The
+# `.githooks/post-commit` mirror phase imports this so the regex
+# consumer and the `build_trailers` producer cannot drift out of
+# lockstep. Byte-exact match against the format
+# `build_trailers("strategy", "<transition>", ...)` emits:
+#   `Strategy-Transition: proposed -> approved`
+#   `Strategy-Transition: approved -> retired`
+# Anchored BOL/EOL + re.MULTILINE so the trailer is matched line-wise
+# (commit messages are multi-line; the subject + body + trailer block
+# are all in the same buffer). Round-trip with build_trailers is
+# enforced by `TrailerRegexRoundTrip` in test_invest_ship_mirror.py.
+MIRROR_TRAILER_RE = re.compile(
+    r"^Strategy-Transition: (?:proposed -> approved|approved -> retired)$",
+    re.MULTILINE,
+)
+
+# Statuses eligible for vault mirroring. Defensive enum: the trailer
+# regex already gates the transition, but the hook re-checks the
+# landed file's frontmatter status before writing so a crafted commit
+# message cannot make the hook mirror a status it shouldn't (e.g. a
+# commit that smuggles the approve trailer onto a body with
+# status=proposed).
+MIRROR_STATUSES = frozenset({"approved", "retired"})
+
+# Codex R7 #2 (HIGH): per-file (old, new) transitions that warrant a
+# mirror. Set is the SAME as the trailer enum, expressed as pairs so
+# the hook can derive eligibility from HEAD-vs-parent state rather
+# than solely from the commit message trailer. Closes the mixed-
+# commit escape: if one file legitimately transitions proposed ->
+# approved AND another approved file is body-edited in the same
+# commit (only possible via `--no-verify`), the trailer matches but
+# per-file transition for the second file is ("approved", "approved")
+# -- not in this set -- so the second file is NOT mirrored.
+MIRROR_ELIGIBLE_TRANSITIONS = frozenset(
+    {
+        ("proposed", "approved"),
+        ("approved", "retired"),
+    }
+)
+
+
+# ---------- vault-root resolver (Q30 Session B -- Change 1) ----------
+
+
+def resolve_vault_root(override: Path | None = None) -> Path:
+    """Return the vault root Claude Code + engine agree on.
+
+    Precedence (Q30 Decision 3, locked):
+
+        1. ``override`` argument (explicit pass-through for tests +
+           internal callers that already know the vault root).
+        2. ``K2BI_VAULT_ROOT`` environment variable (test harnesses set
+           this; prod deploys set it when the vault path diverges from
+           the default, e.g. Mac Mini remap).
+        3. ``DEFAULT_VAULT_ROOT`` module constant
+           (``~/Projects/K2Bi-Vault``).
+
+    Empty-string env values fall through to the constant -- a
+    deployment typo should surface as ``[default vault path] not
+    found`` rather than silently resolving to ``Path("")`` and
+    producing cryptic cwd-relative path errors further downstream.
+
+    Replaces the ``strategy_path.resolve().parents[2]`` auto-detect the
+    approval-gate consumers previously used to locate bear-case + backtest
+    evidence. That auto-detect assumed the strategy file lived under the
+    vault, which was true only as a side effect of tests seeding both the
+    strategy AND its gate evidence under the same tmp repo -- in
+    production the strategy lives in the CODE REPO and the gate evidence
+    lives in the VAULT, so ``parents[2]`` pointed at the wrong tree (root
+    of the Q30 split-brain).
+
+    Cross-tree alignment (Codex R6 #2, architect-scoped):
+    Operators who remap K2BI_VAULT_ROOT MUST also update the engine's
+    ``engine.strategies_dir`` in ``execution/validators/config.yaml``
+    (or the engine will load from a different tree than the hook
+    mirrors to, recreating the Q30 split-brain across a different
+    axis). Cross-tree unification -- making the engine derive its
+    strategies_dir from the same resolver -- is Phase 4+ work scoped
+    out of Session B (kickoff: ``DO NOT touch execution/engine/**``).
+    Keith's single-machine deployment today uses DEFAULT_VAULT_ROOT
+    at both sides + config.yaml's default strategies_dir, so the two
+    align; the divergence risk only surfaces if an operator sets
+    ONE without the other.
+    """
+    if override is not None:
+        return override
+    env_value = os.environ.get("K2BI_VAULT_ROOT", "").strip()
+    if env_value:
+        return Path(env_value)
+    return DEFAULT_VAULT_ROOT
+
+
+# ---------- mirror helper (Q30 Session B -- Change 2) ----------
+
+
+def _probe_vault_destination(vault_root: Path) -> Path:
+    """Validate the vault's strategy-mirror destination is writable.
+
+    Codex R3 #2 (HIGH) fix: a plain ``os.access(vault_root, os.W_OK)``
+    doesn't prove that ``vault_root/wiki/strategies/`` is reachable +
+    writable -- a restrictive permission on ``wiki/`` or a non-
+    directory at ``wiki/strategies/`` leaves approval succeeding while
+    the post-commit mirror silently fails. This helper walks the
+    ancestry (``wiki/`` then ``wiki/strategies/``), mkdir-on-demand,
+    rejects non-directory obstacles + symlinks, then temp-probes the
+    destination with a tempfile+replace write identical to what
+    ``atomic_write_bytes`` performs. If the probe fails, the real
+    mirror will fail too; raising HERE surfaces the defect at
+    approval time instead of letting the commit land and the hook
+    silently log `mirror_failed`.
+
+    Returns the destination directory on success so callers can reuse
+    the probed-to-exist path without re-resolving.
+    """
+    # Codex R4 #2 (HIGH): reject symlinks on EVERY path component in
+    # the destination subtree, not just `vault_root`. `Path.is_dir()`
+    # follows symlinks, so a crafted `vault_root/wiki -> /elsewhere`
+    # or `vault_root/wiki/strategies -> /elsewhere` would pass the
+    # is_dir() guard and then silently redirect writes outside the
+    # vault. Explicit `is_symlink()` checks at each level close that
+    # containment hole; atomic_write_bytes still refuses symlinks at
+    # the final file path (three layers of defence total).
+    #
+    # Codex R9 (HIGH): also reject a symlinked IMMEDIATE parent of
+    # vault_root (e.g. K2BI_VAULT_ROOT=/safe/link/vault where
+    # /safe/link is a symlink). Full ancestor-chain walk up to / is
+    # not applied because OS-level symlinks (macOS /var -> /private/
+    # var, typical on tmpfile paths used by tests) are legitimate
+    # and checking them would break the test harness without
+    # meaningfully closing the threat. The immediate parent is the
+    # attack surface most exposed to operator-level misconfiguration;
+    # deeper ancestor symlinks are architect-scoped out as de minimis
+    # for K2Bi's single-user threat model.
+    if vault_root.parent.is_symlink():
+        raise ValueError(
+            f"vault_root {vault_root!s} has a symlinked immediate "
+            f"parent ({vault_root.parent!s}); refuse to mirror through "
+            f"a redirected path. Set K2BI_VAULT_ROOT to a canonical "
+            f"path with no symlinked direct parent."
+        )
+    if vault_root.is_symlink():
+        raise ValueError(
+            f"vault_root {vault_root!s} is a symlink; refuse to mirror "
+            f"through a vault symlink (TOCTOU hazard + deployment "
+            f"drift vector; resolve or replace the symlink)"
+        )
+    wiki_dir = vault_root / "wiki"
+    if wiki_dir.is_symlink():
+        raise ValueError(
+            f"{wiki_dir!s} is a symlink; refuse to mirror through a "
+            f"symlinked wiki/ (could redirect writes outside the vault; "
+            f"resolve or replace)"
+        )
+    if wiki_dir.exists() and not wiki_dir.is_dir():
+        raise ValueError(
+            f"{wiki_dir!s} exists but is not a directory; remove the "
+            f"blocker before approving strategies"
+        )
+    dest_dir = wiki_dir / "strategies"
+    if dest_dir.is_symlink():
+        raise ValueError(
+            f"{dest_dir!s} is a symlink; refuse to mirror through a "
+            f"symlinked strategies/ (could redirect writes outside the "
+            f"vault; resolve or replace)"
+        )
+    if dest_dir.exists() and not dest_dir.is_dir():
+        raise ValueError(
+            f"{dest_dir!s} exists but is not a directory; remove the "
+            f"blocker before approving strategies"
+        )
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise ValueError(
+            f"cannot create vault destination {dest_dir!s}: {exc}; "
+            f"check filesystem permissions + parent directories"
+        ) from exc
+    # Probe a tempfile in the actual destination dir with the same
+    # atomic_write_bytes mechanics the real mirror uses. Any error
+    # here (read-only mount, denied group write, disk full) surfaces
+    # BEFORE approval proceeds. The probe file is immediately
+    # unlinked; concurrent mirrors to the SAME strategy file name are
+    # governed by atomic_write_bytes's tempfile+os.replace semantics
+    # + first-writer-wins -- the probe is about the dir, not any
+    # specific filename.
+    probe_name = f".k2bi-mirror-probe.{os.getpid()}"
+    probe_path = dest_dir / probe_name
+    try:
+        sf.atomic_write_bytes(probe_path, b"")
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            f"vault destination {dest_dir!s} is not writable: {exc}; "
+            f"check permissions, Syncthing mount state, + mount flags"
+        ) from exc
+    finally:
+        try:
+            probe_path.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # Left-behind probe is not a correctness issue; the
+            # janitor + next-probe-overwrite keeps it bounded. Don't
+            # fail the whole approval over cleanup noise.
+            pass
+    return dest_dir
+
+
+def mirror_strategy_to_vault(
+    repo_path: Path,
+    *,
+    vault_root: Path | None = None,
+    content: bytes | None = None,
+) -> Path:
+    """Atomic-mirror a strategy file from the code repo into the vault.
+
+    The engine's runtime read path is ``{VAULT_ROOT}/wiki/strategies/``;
+    ``/invest-ship --approve-strategy`` + ``--retire-strategy`` edit
+    files under ``{REPO_ROOT}/wiki/strategies/`` (so git hooks fire +
+    ``approved_commit_sha`` resolves). Without a mirror step the engine
+    never sees approvals. The ``.githooks/post-commit`` mirror phase
+    calls this helper on approve + retire transitions so vault state
+    tracks commit state atomically with the commit.
+
+    Q30 Decisions wired in here (LOCKED, see Session B kickoff):
+
+      * Decision 2 -- dest is ``vault_root/wiki/strategies/<filename>``
+        (byte-parity mirror, no slug derivation, no filename rewrite).
+      * Decision 2 -- overwrites stale vault dest atomically; the
+        commit is the source of truth. Symlinks at the dest are
+        refused (inherited from ``sf.atomic_write_bytes``).
+      * Decision 5 -- idempotent: calling twice with identical source
+        bytes produces identical destination bytes. Safe on
+        ``git commit --amend`` re-fire.
+      * Fail-closed on invalid vault_root (not a directory, or the
+        path does not exist). A deployment typo in the env var should
+        surface HERE with a clear message, not downstream as a cryptic
+        mkdir error.
+
+    Parameters
+    ----------
+    repo_path : Path
+        The strategy file inside the code repo. Used for the
+        destination filename (``repo_path.name``). When ``content`` is
+        supplied (Codex R3 #1 fix: hook reads HEAD bytes), the disk
+        file at ``repo_path`` is NOT read -- this closes the working-
+        tree-vs-HEAD drift window. When ``content`` is ``None``,
+        falls back to ``repo_path.read_bytes()`` for direct callers.
+    vault_root : Path | None
+        Override the resolved vault root (tests). ``None`` defers to
+        :func:`resolve_vault_root`.
+    content : bytes | None
+        Explicit bytes to write. The post-commit hook passes
+        ``_file_at_head(path)`` output so the mirror always reflects
+        the committed blob, not the working tree (which might have
+        drifted if the user edited between commit and post-commit
+        hook execution). Falls back to ``repo_path.read_bytes()``
+        when ``None`` -- preserves the existing test + direct-call
+        ergonomics.
+
+    Returns
+    -------
+    Path
+        The vault-side destination the strategy now lives at. Callers
+        that want to log the mirror landing record this path.
+
+    Raises
+    ------
+    ValueError
+        vault_root does not exist, is not a directory, is a symlink,
+        is not writable, or the destination subtree has a blocker.
+    ValueError
+        dest is a symlink (inherited symlink-refusal from
+        ``sf.atomic_write_bytes``).
+    FileNotFoundError
+        ``repo_path`` does not exist (and ``content`` is None).
+    """
+    resolved_vault = resolve_vault_root(vault_root)
+    if not resolved_vault.exists():
+        raise ValueError(
+            f"vault_root {resolved_vault!s} does not exist; create the "
+            f"Syncthing-managed vault directory before approving "
+            f"strategies (Q30 mirror requires a live vault)"
+        )
+    if not resolved_vault.is_dir():
+        raise ValueError(
+            f"vault_root {resolved_vault!s} is not a directory; check "
+            f"K2BI_VAULT_ROOT env var for a deployment typo"
+        )
+    # Codex R3 #2 (HIGH): validate the ACTUAL destination subtree, not
+    # just vault_root. `_probe_vault_destination` walks ancestry,
+    # catches non-dir blockers / symlinks, mkdirs on demand, and runs
+    # a tempfile+replace probe using the same primitive the real write
+    # uses. If the probe passes here, the subsequent atomic_write_bytes
+    # to the same directory will also succeed for the same reason.
+    dest_dir = _probe_vault_destination(resolved_vault)
+    payload = content if content is not None else repo_path.read_bytes()
+    # Codex R5 #2 (MEDIUM): narrow the TOCTOU window between the
+    # ancestor-symlink check inside `_probe_vault_destination` and the
+    # actual write. Another process could swap `wiki/` or
+    # `wiki/strategies/` to a symlink between the probe and the real
+    # write. Re-checking `is_symlink()` here reduces the window from
+    # "probe duration" to "microseconds between this check and
+    # os.replace"; `atomic_write_bytes` refuses symlinks at the FINAL
+    # file path (third layer). Fully closing this requires openat/dirfd
+    # semantics which are not cross-platform; the threat model (K2Bi
+    # is single-user on Keith's machine) makes the residual window
+    # acceptable for MVP -- a privileged attacker who can swap the
+    # dir in microseconds could do much worse.
+    wiki_dir = resolved_vault / "wiki"
+    if wiki_dir.is_symlink():
+        raise ValueError(
+            f"{wiki_dir!s} was replaced with a symlink between probe "
+            f"and write; refusing to mirror (TOCTOU guard)"
+        )
+    if dest_dir.is_symlink():
+        raise ValueError(
+            f"{dest_dir!s} was replaced with a symlink between probe "
+            f"and write; refusing to mirror (TOCTOU guard)"
+        )
+    dest = dest_dir / repo_path.name
+    sf.atomic_write_bytes(dest, payload)
+    return dest
+
 
 # ---------- exceptions ----------
 
@@ -925,8 +1276,11 @@ def scan_backtests_for_slug(
          enum to stay locked to {passed, suspicious}).
 
     `vault_root` is explicit for test determinism; production callers
-    (`handle_approve_strategy`) pass `path.resolve().parents[2]` same as
-    the bear-case gate. Symlink containment is enforced on the
+    (`handle_approve_strategy`) resolve the vault via `resolve_vault_root`
+    (override > K2BI_VAULT_ROOT env > DEFAULT_VAULT_ROOT). Q30 Session B
+    replaced the prior `path.resolve().parents[2]` auto-detect; the
+    gate still accepts an explicit vault_root so test fixtures can pin
+    scan isolation. Symlink containment is enforced on the
     backtests directory so a crafted `wiki/backtests -> elsewhere`
     symlink cannot clear approval from a file outside the vault.
 
@@ -2142,13 +2496,52 @@ def handle_approve_strategy(
             f"string for the bear-case gate"
         )
     primary_ticker = primary_ticker.strip()
-    resolved_vault = vault_root
-    if resolved_vault is None:
-        # Strategy lives at <vault_root>/wiki/strategies/strategy_*.md,
-        # so walk up two parents from the file (parents[2] = <vault_root>).
-        # Resolve the path first so symlinks do not redirect us outside
-        # the vault.
-        resolved_vault = path.resolve().parents[2]
+    # Q30 Session B: vault root is a deployment fact, not a repo-relative
+    # one. `resolve_vault_root` honours explicit override > K2BI_VAULT_ROOT
+    # env > DEFAULT_VAULT_ROOT constant. The prior `path.resolve().parents[2]`
+    # auto-detect resolved to the REPO on code-repo strategy files, so the
+    # bear-case + backtest gates scanned the wrong tree (root of the Q30
+    # split-brain). The approval-gate consumers below
+    # (scan_bear_case_for_ticker, scan_backtests_for_slug) already took an
+    # explicit `vault_root` kwarg; this is the single handler-level seam
+    # that flipped from parents[2] to the resolver.
+    resolved_vault = resolve_vault_root(vault_root)
+    # Approval-time vault pre-flight (MiniMax R1 #2 + #4). Without this
+    # guard, a misconfigured K2BI_VAULT_ROOT surfaces downstream as
+    # "no thesis at /bad/path/wiki/tickers/SPY.md" from the bear-case
+    # scanner -- misleading because the real issue is the vault path.
+    # More importantly, if the approve commit lands and the
+    # post-commit mirror phase then fails (Decision 4: logged not
+    # fatal), the engine reads the CODE REPO state but the VAULT stays
+    # stale until operator intervention. Pre-flight catches the
+    # misconfig at the approve step so the commit never lands until
+    # the vault is reachable.
+    if not resolved_vault.exists():
+        raise ValidationError(
+            f"vault_root {resolved_vault!s} does not exist; set "
+            f"K2BI_VAULT_ROOT or create the Syncthing-managed vault "
+            f"directory before approving strategies (Q30 mirror "
+            f"requires a live vault)"
+        )
+    if not resolved_vault.is_dir():
+        raise ValidationError(
+            f"vault_root {resolved_vault!s} is not a directory; check "
+            f"K2BI_VAULT_ROOT env var for a deployment typo"
+        )
+    # Codex R3 #2 (HIGH): surface vault-destination permission +
+    # subtree problems at approval time by running the same probe the
+    # mirror will later attempt (wiki/strategies/ mkdir + tempfile
+    # probe-write). A plain os.access(vault_root, W_OK) misses tighter
+    # permissions on wiki/ or wiki/strategies/, letting approval
+    # succeed while the post-commit mirror fails silently. This shares
+    # the helper with mirror_strategy_to_vault so the two code paths
+    # fail on the same conditions.
+    try:
+        _probe_vault_destination(resolved_vault)
+    except ValueError as exc:
+        raise ValidationError(
+            f"vault destination pre-flight failed: {exc}"
+        ) from exc
     bear_scan = scan_bear_case_for_ticker(
         primary_ticker, vault_root=resolved_vault, now=today,
     )

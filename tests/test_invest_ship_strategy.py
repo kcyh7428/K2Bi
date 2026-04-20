@@ -502,7 +502,10 @@ class HandleApproveStrategyTests(unittest.TestCase):
         path = _write_strategy(self.repo, slug="spy")
         now = datetime(2026, 4, 19, 10, 0, 0, tzinfo=timezone.utc)
         hints = iss.handle_approve_strategy(
-            path, now=now, today=_dt.date(2026, 4, 19),
+            path,
+            now=now,
+            today=_dt.date(2026, 4, 19),
+            vault_root=self.repo,
         )
 
         self.assertEqual(hints.slug, "spy")
@@ -555,7 +558,9 @@ class HandleApproveStrategyTests(unittest.TestCase):
         )
         path = _write_strategy(self.repo, how_body=body)
         original = path.read_bytes()
-        iss.handle_approve_strategy(path, today=_dt.date(2026, 4, 19))
+        iss.handle_approve_strategy(
+            path, today=_dt.date(2026, 4, 19), vault_root=self.repo,
+        )
         edited = path.read_bytes()
         # Body slice starts after the second `---\n` boundary.
         def body_bytes(b: bytes) -> bytes:
@@ -692,7 +697,10 @@ class BearCaseGateThroughApprovalTests(unittest.TestCase):
         path = _write_strategy(self.repo, slug="spy")
         with self.assertRaises(iss.ValidationError) as cm:
             iss.handle_approve_strategy(
-                path, parent_sha=self.parent_sha, today=self.today,
+                path,
+                parent_sha=self.parent_sha,
+                today=self.today,
+                vault_root=self.repo,
             )
         self.assertIn("bear-case", str(cm.exception).lower())
         self.assertIn("SPY", str(cm.exception))
@@ -706,7 +714,10 @@ class BearCaseGateThroughApprovalTests(unittest.TestCase):
         path = _write_strategy(self.repo, slug="spy")
         with self.assertRaises(iss.ValidationError) as cm:
             iss.handle_approve_strategy(
-                path, parent_sha=self.parent_sha, today=self.today,
+                path,
+                parent_sha=self.parent_sha,
+                today=self.today,
+                vault_root=self.repo,
             )
         self.assertIn("stale", str(cm.exception).lower())
 
@@ -739,7 +750,10 @@ class BearCaseGateThroughApprovalTests(unittest.TestCase):
         path = _write_strategy(self.repo, slug="spy")
         with self.assertRaises(iss.ValidationError) as cm:
             iss.handle_approve_strategy(
-                path, parent_sha=self.parent_sha, today=self.today,
+                path,
+                parent_sha=self.parent_sha,
+                today=self.today,
+                vault_root=self.repo,
             )
         self.assertIn("VETO", str(cm.exception))
         self.assertIn("85", str(cm.exception))
@@ -755,7 +769,10 @@ class BearCaseGateThroughApprovalTests(unittest.TestCase):
         path = _write_strategy(self.repo, slug="spy")
         with self.assertRaises(iss.ValidationError) as cm:
             iss.handle_approve_strategy(
-                path, parent_sha=self.parent_sha, today=self.today,
+                path,
+                parent_sha=self.parent_sha,
+                today=self.today,
+                vault_root=self.repo,
             )
         self.assertIn("parse", str(cm.exception).lower())
         self.assertIn("SPY", str(cm.exception))
@@ -770,7 +787,10 @@ class BearCaseGateThroughApprovalTests(unittest.TestCase):
         )
         with self.assertRaises(iss.ValidationError) as cm:
             iss.handle_approve_strategy(
-                path, parent_sha=self.parent_sha, today=self.today,
+                path,
+                parent_sha=self.parent_sha,
+                today=self.today,
+                vault_root=self.repo,
             )
         # `_validate_strategy_shape` fires FIRST with the missing-key
         # message -- this proves the ordering: shape check precedes the
@@ -1264,11 +1284,20 @@ class CLISubprocessTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.env = os.environ.copy()
-        cls.env["PYTHONPATH"] = str(REPO_ROOT)
+        cls._base_env = os.environ.copy()
+        cls._base_env["PYTHONPATH"] = str(REPO_ROOT)
+        # Q30 Session B: the approval handler now resolves vault root via
+        # `resolve_vault_root` (constant + K2BI_VAULT_ROOT env) instead of
+        # walking up `parents[2]` from the strategy path. CLI tests seed
+        # bear-case + backtest evidence inside the tmp repo, so `self.repo`
+        # IS the vault for these tests; pin K2BI_VAULT_ROOT accordingly
+        # per-test (setUp) so concurrent tests do not cross-pollute.
+        cls._base_env.pop("K2BI_VAULT_ROOT", None)
 
     def setUp(self):
         self.repo, self.parent_sha = _make_tmp_repo()
+        self.env = dict(self._base_env)
+        self.env["K2BI_VAULT_ROOT"] = str(self.repo)
 
     def tearDown(self):
         subprocess.run(["rm", "-rf", str(self.repo)], check=False)

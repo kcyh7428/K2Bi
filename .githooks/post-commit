@@ -1,37 +1,75 @@
 #!/usr/bin/env python3
-"""K2Bi post-commit hook -- retire sentinel landing (Bundle 3 cycle 4).
+"""K2Bi post-commit hook -- retire sentinel + Q30 vault mirror.
 
-Closes the orphaned-sentinel race Q10 flagged: sentinels exist only
-when the retire commit actually lands. On any commit-abort path the
-hook never runs, so `.retired-<sha16>` is absent and the engine's
-submit path still sees a healthy `status: approved` file.
+Two independent phases, both running on every landed commit:
 
-Flow:
+  1. Retire-sentinel phase (Bundle 3 cycle 4). On commits whose
+     message contains a `Retired-Strategy: strategy_<slug>` trailer,
+     write the `.retired-<sha16>` sentinel through
+     `execution.risk.kill_switch.write_retired` so the engine's
+     submit path blocks subsequent orders for the retired slug.
+     Closes the orphaned-sentinel race Q10 flagged: sentinels exist
+     only when the retire commit actually lands (commit-abort paths
+     never fire post-commit).
 
-1. If `K2BI_SKIP_POST_COMMIT_RETIRE=1`, exit 0 silently (used by
-   the test harness + manual hook-repair workflows).
-2. Read the just-landed commit message via `git log -1 --format=%B`.
-   Exit 0 if no `Retired-Strategy: strategy_<slug>` trailer is
-   present (this commit is not a retire).
-3. For every file in `git diff-tree --no-commit-id --name-only -r HEAD`
-   that matches `wiki/strategies/strategy_*.md`:
-   a. Read the file at HEAD (already landed) via `git show HEAD:<path>`.
-   b. Parse its frontmatter; if `status` isn't `retired`, skip.
-   c. Derive the slug via `execution.engine.main.derive_retire_slug`
-      (strips the `strategy_` prefix). This is the same derivation
-      the engine runs on every submit tick -- parity is the whole
-      point.
-   d. Call `execution.risk.kill_switch.write_retired(slug, reason,
-      commit_sha)` with the base dir resolved via
-      `resolve_retired_dir` honoring `K2BI_RETIRED_DIR` in tests.
-   e. First-writer-wins: write_retired returns None if a sentinel
-      was already present (e.g. `git commit --amend` re-firing).
-      That's not a failure.
-4. Log any unexpected exception to stderr and (best-effort) to
-   `scripts/wiki-log-append.sh`. The commit is already durable so
-   we always exit 0 (the post-commit hook API does not fail commits).
+  2. Q30 vault-mirror phase (Session B, 2026-04-20). On commits whose
+     message contains a `Strategy-Transition: proposed -> approved`
+     OR `approved -> retired` trailer AND the per-file HEAD-vs-parent
+     transition matches MIRROR_ELIGIBLE_TRANSITIONS, mirror the
+     touched strategy file from the code repo into the Syncthing-
+     managed vault via
+     `scripts.lib.invest_ship_strategy.mirror_strategy_to_vault`. The
+     engine's runtime read path is vault-side; without this phase an
+     approved strategy committed to the code repo never reaches the
+     engine. Closes Q30 (code-repo vs vault split-brain).
 
-Design decisions carried in from cycle 4 defensive design decisions:
+Phase ordering: mirror runs BEFORE retire-sentinel. Rationale: the
+sentinel is the nuclear gate; if the sentinel lands but mirror fails,
+the engine's submit path blocks via sentinel + drift-detection. If the
+mirror lands but sentinel fails, the engine's sentinel is missing --
+drift detection still blocks submit. Both orderings fail-safe; mirror-
+first means vault state reflects commit state BEFORE the hard-kill
+sentinel asserts, which is simpler to audit.
+
+Failure handling (both phases, Decision 4 LOCKED):
+- Post-commit hooks CANNOT abort the commit (git ignores non-zero
+  return from post-commit). The commit is already in the tree.
+- Per-file exceptions log to stderr + best-effort wiki-log append +
+  continue to next file. Never raise from main().
+- Unrecoverable errors (import failure, git rev-parse failure) log +
+  exit 0.
+
+Mirror-loss detection contract (Codex R6 #1, architect-scoped):
+- The engine's `strategy_file_modified_post_approval` drift check
+  only catches MODIFIED files that were already loaded -- it does
+  NOT catch a NEWLY-approved strategy whose mirror never wrote to
+  the vault. If a mirror fails silently at post-commit time, the
+  engine's `load_all_approved()` would skip the strategy entirely
+  (it's absent from the vault scan) and run other strategies
+  without awareness of the gap.
+- Primary guarantee AGAINST this failure mode is the approval-time
+  pre-flight in `handle_approve_strategy`: `_probe_vault_destination`
+  performs a tempfile+replace probe at the actual destination
+  directory before the commit is allowed to proceed. If the probe
+  passes at approval time, a subsequent post-commit mirror failure
+  requires the vault to have changed state (gone read-only, filled
+  up, lost Syncthing mount) between approval and post-commit --
+  microsecond-to-millisecond window on a single-machine setup.
+- When a mirror failure IS logged, the operator must re-run
+  ``/invest-ship`` (or manually mirror) to restore vault state.
+  The stderr + wiki-log entries are the authoritative signal; the
+  engine cannot detect the absence on its own.
+- Full engine-side reconciliation (scanning repo + vault for
+  approved-status divergence on startup) is Phase 4+ work; the
+  kickoff scopes `execution/engine/**` out of Session B.
+
+Env skip flags (orthogonal):
+- `K2BI_SKIP_POST_COMMIT_RETIRE=1` -- skip retire-sentinel phase.
+- `K2BI_SKIP_POST_COMMIT_MIRROR=1` -- skip vault-mirror phase.
+- Use independently; a test that wants to exercise mirror without
+  sentinel noise sets one; vice versa.
+
+Design decisions (both phases):
 
 - File enumeration uses `git diff-tree`, NOT the trailer's slug
   portion, because trailer text is a human-readable hint whose
@@ -40,7 +78,10 @@ Design decisions carried in from cycle 4 defensive design decisions:
   re-implementation; it's the canonical hook/engine parity seam.
 - The sentinel-dir resolver is shared with the engine; both honor
   `K2BI_RETIRED_DIR` override if present, else fall back to
-  `DEFAULT_RETIRED_DIR`.
+  `DEFAULT_RETIRED_DIR`. The vault resolver honours `K2BI_VAULT_ROOT`
+  override, else falls back to `DEFAULT_VAULT_ROOT`.
+- Mirror trailer regex matches byte-exact on the producer's
+  `build_trailers` output (canonical ` -> ` separator, single space).
 """
 
 from __future__ import annotations
@@ -76,6 +117,13 @@ from execution.risk.kill_switch import (  # noqa: E402
     write_retired,
 )
 from execution.validators.config import load_config  # noqa: E402
+from scripts.lib.invest_ship_strategy import (  # noqa: E402
+    MIRROR_ELIGIBLE_TRANSITIONS,
+    MIRROR_STATUSES,
+    MIRROR_TRAILER_RE,
+    mirror_strategy_to_vault,
+    resolve_vault_root,
+)
 from scripts.lib.strategy_frontmatter import (  # noqa: E402
     extract_status,
     parse as parse_frontmatter,
@@ -94,19 +142,44 @@ def _git(*args: str) -> subprocess.CompletedProcess:
     )
 
 
+def _git_binary(*args: str) -> subprocess.CompletedProcess:
+    """Run git with binary stdout (no text decode/re-encode).
+
+    Codex R4 #1 (HIGH): `_file_at_head` was previously using the
+    text-mode `_git` helper which locale-decodes stdout to str and
+    then re-encodes as utf-8. That round-trip can drop invalid byte
+    sequences or normalise line endings, so the mirror would write
+    bytes that don't match the committed blob even though the
+    calling code claimed byte-exact HEAD fidelity. Using binary mode
+    here preserves every byte git produces -- the authoritative
+    committed state.
+    """
+    return subprocess.run(
+        ["git", *args], capture_output=True, text=False, check=False
+    )
+
+
 def _log_stderr(msg: str) -> None:
     print(f"[post-commit] {msg}", file=sys.stderr)
 
 
 def _log_wiki(event: str, detail: str) -> None:
     """Best-effort append to the wiki/log.md via the single-writer
-    helper. Silent on failure -- we never raise from here."""
+    helper. Silent on failure -- we never raise from here.
+
+    `scripts/wiki-log-append.sh` takes three required positional args:
+    SKILL, ACTION, SUMMARY. The hook identifies itself as `post-commit`
+    so log consumers can filter by the originating subsystem; `event`
+    maps to ACTION (e.g. `retire_sentinel_write_failed`,
+    `mirror_failed`); `detail` carries the per-file context + commit
+    sha into SUMMARY.
+    """
     helper = REPO_ROOT / "scripts" / "wiki-log-append.sh"
     if not helper.exists():
         return
     try:
         subprocess.run(
-            [str(helper), event, detail],
+            [str(helper), "post-commit", event, detail],
             check=False,
             capture_output=True,
             timeout=5,
@@ -192,6 +265,34 @@ def _commit_sha() -> str:
     return result.stdout.strip()
 
 
+def _is_merge_commit() -> bool:
+    """Return True if HEAD is a merge commit (2+ parents).
+
+    Codex R8 (HIGH): per-file transition derivation uses ``HEAD~1``
+    as the preimage, which on a merge commit is only the first
+    parent -- not necessarily the parent that carried the relevant
+    strategy file edit. That produces misclassified transitions
+    (``(None, approved)`` etc.) and the eligible-transitions gate
+    silently skips a legitimate mirror.
+
+    Keith's current single-machine workflow produces only linear
+    commits via ``/invest-ship``; merge commits would imply a
+    feature-branch + merge workflow that Session B does not target
+    and that K2Bi does not use today (kickoff: Phase 2-3 has no PR
+    flow). The safe answer is to detect the merge, skip the mirror
+    entirely with a LOUD audit log, and require operator-driven
+    manual recovery via a follow-up ``/invest-ship`` (same recovery
+    as any other mirror failure). Full merge-commit support is
+    Phase 6+ work when / if Keith adopts PR-based approvals.
+    """
+    result = _git("rev-list", "--parents", "-n", "1", "HEAD")
+    if result.returncode != 0:
+        return False
+    parts = result.stdout.strip().split()
+    # rev-list --parents output: "<sha> <parent1> [parent2] ..."
+    return len(parts) > 2
+
+
 def _changed_strategy_paths() -> list[str]:
     result = _git(
         "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"
@@ -204,26 +305,219 @@ def _changed_strategy_paths() -> list[str]:
 
 
 def _file_at_head(path: str) -> bytes:
-    result = _git("show", f"HEAD:{path}")
+    # Codex R4 #1 (HIGH): use binary git so the mirror writes the
+    # exact bytes of the committed blob. Round-tripping through
+    # text mode would silently corrupt line endings + non-utf-8
+    # sequences and break the engine's strategy_file_modified_post_
+    # approval hash gate on reload.
+    result = _git_binary("show", f"HEAD:{path}")
     if result.returncode != 0:
         return b""
-    return result.stdout.encode("utf-8")
+    return result.stdout
 
 
-def main() -> int:
+def _file_at_parent(path: str) -> bytes:
+    """Return HEAD~1 bytes for `path`, or b'' if the file didn't exist.
+
+    Codex R7 #2 (HIGH): per-file transition derivation. The mirror
+    phase needs the parent-commit state to compute (old_status ->
+    new_status) for each changed strategy file, so we can mirror only
+    files whose transition IS in the allowed set (proposed -> approved,
+    approved -> retired). Without per-file derivation, a mixed commit
+    that lands one legit approve trailer + one unrelated body edit on
+    another approved file would mirror both; with it, only the legit
+    transition is mirrored.
+
+    Non-zero exit => file didn't exist at HEAD~1 (initial commit of
+    the file in this repo history, or initial commit of the whole
+    repo). Return b"" -- parsed downstream as `(new file)` state.
+    """
+    result = _git_binary("show", f"HEAD~1:{path}")
+    if result.returncode != 0:
+        return b""
+    return result.stdout
+
+
+def _run_mirror_phase(message: str, commit_sha: str) -> None:
+    """Q30 Session B vault-mirror phase.
+
+    On an approve or retire transition, mirror the landed strategy
+    file into the vault at ``<VAULT_ROOT>/wiki/strategies/<name>``.
+    Fail-open-log-only on every error: the commit is already durable,
+    and the engine's existing drift detection catches vault/repo
+    divergence on the next startup. Never raise from this function.
+
+    Runs BEFORE the retire-sentinel phase (see module docstring for
+    ordering rationale).
+
+    Architect-locked trigger discipline (kickoff Decision 6, reviewer
+    pushback resolved via L-2026-04-20-002):
+    - The mirror fires ONLY when the commit message has a matching
+      `Strategy-Transition:` trailer. Codex R5 argued for HEAD-vs-parent
+      file-transition detection so that `git commit --no-verify`
+      bypass paths cannot silently skip the mirror. Architect decision:
+      `--no-verify` is a known operator escape hatch that bypasses
+      ALL hook-based controls (pre-commit Checks A-D, commit-msg
+      transition enum, post-commit mirror + sentinel). The mirror's
+      trailer-gate is consistent with that threat model; adding
+      parallel HEAD-diff detection would only partially close the
+      bypass and increases code surface on a capital-path hook. The
+      engine's `strategy_file_modified_post_approval` drift detection
+      catches vault/repo divergence at engine startup, which IS the
+      correct escalation path for intentional bypass. The defence-in-
+      depth audit log added below flags the bypass case in wiki-log
+      for post-hoc visibility without changing the trigger mechanism.
+    """
+    if os.environ.get("K2BI_SKIP_POST_COMMIT_MIRROR") == "1":
+        return
+    # Codex R8 (HIGH): merge commits break HEAD~1-based transition
+    # derivation. Skip + audit-log loudly so the operator sees the
+    # vault stays stale and knows to re-run /invest-ship for linear
+    # recovery. Keith's current workflow produces only linear commits
+    # so this path is dormant today; full support is Phase 6+.
+    if _is_merge_commit():
+        commit_sha_short = commit_sha[:12] if commit_sha else "?"
+        _log_stderr(
+            f"mirror phase: SKIPPED on merge commit {commit_sha_short} "
+            f"-- per-file transition derivation is not supported on "
+            f"merge commits; vault NOT updated. Re-run /invest-ship on "
+            f"a linear approve/retire commit OR manually mirror via "
+            f"the helper. Full merge-commit support is Phase 6+."
+        )
+        _log_wiki(
+            "mirror_skipped_merge_commit",
+            f"commit={commit_sha} (vault may drift until linear follow-up)",
+        )
+        return
+    if not MIRROR_TRAILER_RE.search(message):
+        # Bypass observability: if a strategy file changed with
+        # approved/retired status but no mirror trailer appeared in
+        # the commit message, that's either `--no-verify` (acceptable
+        # per the architect-locked threat model above) OR a
+        # build_trailers drift the round-trip test didn't catch.
+        # Either way the operator benefits from seeing it in the
+        # wiki-log audit trail.
+        for path in _changed_strategy_paths():
+            head_bytes = _file_at_head(path)
+            if not head_bytes:
+                continue
+            try:
+                fm = parse_frontmatter(head_bytes)
+            except ValueError:
+                continue
+            if extract_status(fm) in MIRROR_STATUSES:
+                _log_stderr(
+                    f"mirror skipped (no Strategy-Transition trailer) "
+                    f"for {path}; vault may drift. If this commit was "
+                    f"`--no-verify`, re-run /invest-ship to restore "
+                    f"the mirror; otherwise audit build_trailers."
+                )
+                _log_wiki(
+                    "mirror_skipped_no_trailer",
+                    f"{path} commit={commit_sha}",
+                )
+        return
+
+    try:
+        vault_root = resolve_vault_root()
+    except Exception:  # noqa: BLE001 -- log + skip whole phase
+        _log_stderr(
+            "mirror phase: could not resolve vault root, skipping:\n"
+            f"{traceback.format_exc()}"
+        )
+        _log_wiki(
+            "mirror_failed",
+            f"resolve_vault_root error commit={commit_sha}",
+        )
+        return
+
+    for path in _changed_strategy_paths():
+        content = _file_at_head(path)
+        if not content:
+            continue
+        try:
+            fm = parse_frontmatter(content)
+        except ValueError as exc:
+            _log_stderr(
+                f"{path}: mirror skip -- frontmatter parse failed ({exc})"
+            )
+            continue
+        status = extract_status(fm)
+        if status not in MIRROR_STATUSES:
+            # Trailer says approve/retire but body doesn't match --
+            # crafted commit or a body-only edit on an approved file
+            # (Check D blocks that, but belt-and-braces here).
+            continue
+        # Codex R7 #2 (HIGH): derive the per-file (old, new)
+        # transition from HEAD vs HEAD~1 and gate on
+        # MIRROR_ELIGIBLE_TRANSITIONS. Without this, a mixed commit
+        # (one legitimate approve trailer + one approved file
+        # body-edited via `--no-verify`) would mirror both files.
+        # With it, the second file's transition is
+        # ("approved", "approved") -- not eligible -- and the
+        # mirror no-ops that file. The first file's legit
+        # transition still mirrors.
+        parent_bytes = _file_at_parent(path)
+        try:
+            parent_fm = (
+                parse_frontmatter(parent_bytes) if parent_bytes else {}
+            )
+        except ValueError:
+            parent_fm = {}
+        old_status = extract_status(parent_fm)
+        if (old_status, status) not in MIRROR_ELIGIBLE_TRANSITIONS:
+            _log_stderr(
+                f"{path}: mirror skip -- per-file transition "
+                f"{(old_status, status)!r} not eligible (only "
+                f"{sorted(MIRROR_ELIGIBLE_TRANSITIONS)} trigger mirror)"
+            )
+            continue
+        source = REPO_ROOT / path
+        try:
+            # Codex R3 #1 (HIGH): mirror the EXACT bytes that just
+            # landed in the commit (`content` comes from
+            # `_file_at_head(path)` via `git show HEAD:<path>`), not
+            # the disk / working-tree bytes. If a process wrote to
+            # the strategy file between the commit's index write and
+            # the hook firing (editor auto-save, a concurrent
+            # invest-ship run, etc.), the working tree + HEAD diverge
+            # for a window -- reading from disk here would mirror
+            # uncommitted bytes into the vault (engine's runtime
+            # source of truth), while git history still shows the
+            # committed blob. The hook already has `content` in hand
+            # for frontmatter parsing; passing it through closes the
+            # drift window.
+            mirror_strategy_to_vault(
+                source, vault_root=vault_root, content=content,
+            )
+        except Exception:  # noqa: BLE001 -- surface then continue
+            _log_stderr(
+                f"{path}: mirror failed:\n{traceback.format_exc()}"
+            )
+            _log_wiki(
+                "mirror_failed",
+                f"{path} commit={commit_sha}",
+            )
+            continue
+
+
+def _run_retire_sentinel_phase(message: str, commit_sha: str) -> None:
+    """Retire-sentinel phase (pre-existing cycle-4 logic, factored out
+    so ``main`` composes the two phases cleanly).
+
+    On a `Retired-Strategy:` trailer, write the `.retired-<sha16>`
+    sentinel through the engine-shared kill_switch module. First-
+    writer-wins: concurrent retires + `git commit --amend` re-fires
+    keep the authoritative record stable.
+    """
     if os.environ.get("K2BI_SKIP_POST_COMMIT_RETIRE") == "1":
-        return 0
-
-    message = _commit_message()
+        return
     if not RETIRED_TRAILER_RE.search(message):
-        # Not a retire commit. Nothing to do.
-        return 0
+        return
 
-    commit_sha = _commit_sha()
     retired_dir = _resolve_retired_dir()
     retired_dir.mkdir(parents=True, exist_ok=True)
 
-    landed: list[tuple[str, Path]] = []
     for path in _changed_strategy_paths():
         content = _file_at_head(path)
         if not content:
@@ -261,11 +555,32 @@ def main() -> int:
             # First-writer-wins means the existing record is the
             # authoritative one; this is not an error.
             continue
-        landed.append((path, sentinel))
+
+
+def main() -> int:
+    message = _commit_message()
+    commit_sha = _commit_sha()
+
+    # Mirror BEFORE sentinel (see module docstring ordering note).
+    # Each phase is independently env-skippable + independently
+    # fail-open; one phase blowing up does not affect the other.
+    try:
+        _run_mirror_phase(message, commit_sha)
+    except Exception:  # noqa: BLE001 -- defense-in-depth; never raise
+        _log_stderr(
+            f"unexpected error in mirror phase:\n{traceback.format_exc()}"
+        )
+
+    try:
+        _run_retire_sentinel_phase(message, commit_sha)
+    except Exception:  # noqa: BLE001 -- defense-in-depth; never raise
+        _log_stderr(
+            f"unexpected error in retire-sentinel phase:\n{traceback.format_exc()}"
+        )
 
     # Post-commit hooks cannot fail the commit (git ignores non-zero
     # return from post-commit). Return 0 regardless so the commit
-    # stays clean even when sentinel land partially failed.
+    # stays clean even when a phase's internals partially failed.
     return 0
 
 
