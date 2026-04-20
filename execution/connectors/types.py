@@ -87,6 +87,26 @@ class BrokerOpenOrder:
     recognize linked stop-loss child orders so they are not flagged
     as phantoms after parent fills. Empty when the connector cannot
     surface a client reference.
+
+    `aux_price` carries the broker's `auxPrice` field -- the STOP
+    trigger for STP orders and the trail amount for TRAIL orders.
+    For LMT parents the broker populates `lmtPrice` (mapped to
+    `limit_price` here) and leaves `auxPrice` at 0. For STP children
+    the reverse holds: `lmtPrice` is 0 and `auxPrice` carries the
+    trigger. Q31 protective-stop-drift validation compares this
+    against the checkpoint's `trigger_price`.
+
+    CONTRACT: Any connector that surfaces STP orders MUST populate
+    `aux_price` with the order's trigger. The default Decimal("0")
+    is a FAIL-CLOSED sentinel per Session A Design Decision 6:
+    recovery compares this field via EXACT Decimal equality against
+    the journaled trigger, so an unpopulated aux_price on a real
+    STP order will emit `protective_stop_price_drift` and block
+    startup. This is intentional -- a connector that drops stop
+    trigger info should refuse-to-start, not silently proceed with
+    unverified protective stops. Live IBKR connector pulls from
+    ib_async's `order.auxPrice`; mock connectors for tests must set
+    aux_price explicitly whenever the mock returns a stop child.
     """
 
     broker_order_id: str
@@ -100,6 +120,7 @@ class BrokerOpenOrder:
     submitted_at: datetime | None = None
     tif: str = "DAY"
     client_tag: str = ""
+    aux_price: Decimal = Decimal("0")
 
 
 CLIENT_TAG_PREFIX = "k2bi:"

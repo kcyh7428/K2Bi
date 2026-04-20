@@ -566,6 +566,282 @@ def reconcile(
                 }
             )
 
+    # ---- Phase B.3: protective-stop invariants (Q31) ----
+    #
+    # Consumes Q32's expected_stop_children checkpoint AND the current
+    # journal_tail (for freshly-opened positions without a prior
+    # checkpoint entry) + broker open orders to enforce three safety
+    # invariants on adopted positions with a journaled protective
+    # stop. Any mismatch emits into `mismatches` (existing path), so
+    # recovery fails with MISMATCH_REFUSED per kickoff Decision 4.
+    # No auto-recovery, no auto-reattach -- operator investigates
+    # before relaunching.
+    #
+    # Three cases, ordered by specificity:
+    #   - missing_protective_stop: broker has NO stop child at all
+    #     for this ticker whose trade_id matches the expected one.
+    #   - protective_stop_tag_mismatch: broker has a stop on the
+    #     ticker but its parsed (strategy, trade_id) pair differs
+    #     from the expected entry.
+    #   - protective_stop_price_drift: broker has a matching-tag stop
+    #     but its trigger (aux_price for STP orders) differs from
+    #     the expected trigger_price via exact Decimal equality
+    #     (kickoff Decision 6: strict MVP, no tolerance).
+    #
+    # Intentionally-cancelled stops fail with missing_protective_stop
+    # per Decision 5. There is no journal event recording "operator
+    # cancelled intent" today; fail-closed is the correct default
+    # until a Phase 4 `/invest unprotect-position` command exists.
+    #
+    # Only evaluates positions that are currently held at the broker
+    # (ticker in broker_by_ticker). An expected entry whose ticker
+    # has no broker position is irrelevant here (the position was
+    # closed; any orphaned stop at broker is caught by Phase B.1's
+    # broker_position_tickers gate).
+    #
+    # Union source: prior-checkpoint entries (Q32 persistence across
+    # restart hops) + journal-tail parents (first-time protection for
+    # positions created in the current window that haven't been
+    # checkpointed yet). Fresh journal parents WIN when trade_ids
+    # collide -- the journal is always more authoritative than a
+    # stale checkpoint for the same trade_id. MiniMax R1 Finding 2
+    # called out this defense-in-depth requirement.
+    expected_entries: list[dict[str, Any]] = []
+    covered_trade_ids: set[str] = set()
+    # Step 1: walk journal_tail for recent parents with stop_loss on
+    # adopted-position tickers. For each unique (ticker, trade_id)
+    # with the latest non-null stop_loss, synthesize an entry in the
+    # checkpoint shape so Phase B.3 can validate it uniformly.
+    # MVP one-parent-per-ticker means at most one journal entry per
+    # ticker here; newer records overwrite older.
+    position_tickers_now = set(broker_by_ticker)
+    journal_parent_by_ticker: dict[str, dict[str, Any]] = {}
+    for rec in journal_tail:
+        et = rec.get("event_type")
+        if et not in {"order_submitted", "order_filled"}:
+            continue
+        payload = rec.get("payload") or {}
+        ticker = rec.get("ticker") or payload.get("ticker")
+        if not ticker or ticker not in position_tickers_now:
+            continue
+        trade_id = rec.get("trade_id")
+        if not trade_id:
+            continue
+        side = (rec.get("side") or payload.get("side") or "").lower()
+        if side and side != "buy":
+            continue
+        strategy = rec.get("strategy")
+        stop_loss = payload.get("stop_loss")
+        prior = journal_parent_by_ticker.get(ticker)
+        if (
+            prior is not None
+            and prior.get("trade_id") == trade_id
+            and stop_loss in (None, "None", "")
+            and prior.get("stop_loss") not in (None, "None", "")
+        ):
+            stop_loss = prior["stop_loss"]
+        journal_parent_by_ticker[ticker] = {
+            "ticker": ticker,
+            "strategy": strategy,
+            "trade_id": trade_id,
+            "stop_loss": stop_loss,
+        }
+    # Also scan the Phase A synthesized events for
+    # recovery_reconciled(case in {pending_filled, pending_partially_filled}):
+    # when the engine crashed between order_proposed and
+    # order_submitted, the ONLY surviving stop metadata lives in
+    # the journal_view payload of this freshly-built event
+    # (Codex Commit-2 R1 P1). Without this scan, Q31 cannot protect
+    # a position first surfaced via broker-status-history recovery.
+    parent_fill_cases = {"pending_filled", "pending_partially_filled"}
+    for ev in events:
+        if ev.event_type != "recovery_reconciled":
+            continue
+        payload = ev.payload or {}
+        if payload.get("case") not in parent_fill_cases:
+            continue
+        ticker = ev.ticker
+        trade_id = ev.trade_id
+        if not ticker or ticker not in position_tickers_now or not trade_id:
+            continue
+        journal_view = payload.get("journal_view") or {}
+        side = str(journal_view.get("side") or "").lower()
+        if side and side != "buy":
+            continue
+        stop_loss = journal_view.get("stop_loss")
+        prior = journal_parent_by_ticker.get(ticker)
+        if (
+            prior is not None
+            and prior.get("trade_id") == trade_id
+            and stop_loss in (None, "None", "")
+            and prior.get("stop_loss") not in (None, "None", "")
+        ):
+            stop_loss = prior["stop_loss"]
+        journal_parent_by_ticker[ticker] = {
+            "ticker": ticker,
+            "strategy": ev.strategy,
+            "trade_id": trade_id,
+            "stop_loss": stop_loss,
+        }
+
+    for parent in journal_parent_by_ticker.values():
+        strategy = parent.get("strategy")
+        trade_id = parent.get("trade_id")
+        stop_loss = parent.get("stop_loss")
+        if not strategy or not trade_id:
+            continue
+        if stop_loss in (None, "None", ""):
+            continue
+        expected_entries.append(
+            {
+                "ticker": parent["ticker"],
+                "strategy": strategy,
+                "parent_trade_id": trade_id,
+                "client_tag": (
+                    f"{strategy}:{trade_id}{CLIENT_TAG_STOP_SUFFIX}"
+                ),
+                "trigger_price": str(stop_loss),
+            }
+        )
+        covered_trade_ids.add(trade_id)
+    # Step 2: add prior-checkpoint entries whose TICKER has no fresh
+    # journal parent at all. Codex Commit-2 R2 P1: MVP one-parent-
+    # per-ticker means a fresh journal parent on a ticker supersedes
+    # every stale checkpoint entry for that ticker, not just ones
+    # with the matching trade_id. This mirrors the supersede-by-
+    # ticker rule in build_expected_stop_children and prevents a
+    # legitimate same-ticker exit-and-reenter from failing recovery
+    # due to the stale stop's missing tag/trigger at broker.
+    if checkpoint_stop_children:
+        fresh_journal_tickers = set(journal_parent_by_ticker)
+        for entry in checkpoint_stop_children:
+            tid = entry.get("parent_trade_id")
+            entry_ticker = entry.get("ticker")
+            if not tid or tid in covered_trade_ids:
+                continue
+            if entry_ticker in fresh_journal_tickers:
+                # Fresh journal parent exists for this ticker; the
+                # checkpoint's stale entry is superseded.
+                continue
+            expected_entries.append(entry)
+            covered_trade_ids.add(tid)
+
+    if expected_entries:
+        stops_by_ticker: dict[str, list[BrokerOpenOrder]] = {}
+        for open_order in broker_open_orders:
+            _strategy, _tid, is_stop_order = parse_client_tag(
+                open_order.client_tag
+            )
+            if not is_stop_order:
+                continue
+            stops_by_ticker.setdefault(open_order.ticker, []).append(
+                open_order
+            )
+        for entry in expected_entries:
+            ticker = entry.get("ticker")
+            expected_trade_id = entry.get("parent_trade_id")
+            expected_strategy = entry.get("strategy")
+            expected_client_tag = entry.get("client_tag")
+            expected_trigger_raw = entry.get("trigger_price")
+            if (
+                not ticker
+                or not expected_trade_id
+                or not expected_strategy
+                or not expected_client_tag
+                or expected_trigger_raw in (None, "", "None")
+            ):
+                # Malformed checkpoint entry; nothing reliable to
+                # validate against. Skip.
+                continue
+            if ticker not in broker_by_ticker:
+                # Position closed; orphan stop (if any) is Phase B.1's
+                # concern. No Q31 invariant applies.
+                continue
+            try:
+                expected_trigger = Decimal(str(expected_trigger_raw))
+            except (InvalidOperation, ValueError, TypeError):
+                # Corrupt trigger_price in checkpoint; treat as
+                # missing (fail-closed).
+                mismatches.append(
+                    {
+                        "case": "missing_protective_stop",
+                        "ticker": ticker,
+                        "expected_trade_id": expected_trade_id,
+                        "expected_strategy": expected_strategy,
+                        "expected_client_tag": expected_client_tag,
+                        "note": "checkpoint trigger_price is corrupt",
+                    }
+                )
+                continue
+            ticker_stops = stops_by_ticker.get(ticker, [])
+            if not ticker_stops:
+                # No broker-side stop child at all for this ticker.
+                # Could be: operator cancelled, broker dropped, order
+                # never placed. Fail-closed per Decision 5.
+                mismatches.append(
+                    {
+                        "case": "missing_protective_stop",
+                        "ticker": ticker,
+                        "expected_trade_id": expected_trade_id,
+                        "expected_strategy": expected_strategy,
+                        "expected_client_tag": expected_client_tag,
+                        "expected_trigger_price": str(expected_trigger),
+                    }
+                )
+                continue
+            matched_stop: BrokerOpenOrder | None = None
+            tag_mismatch_stops: list[BrokerOpenOrder] = []
+            for stop in ticker_stops:
+                parsed_strategy, parsed_tid, _ = parse_client_tag(
+                    stop.client_tag
+                )
+                if (
+                    parsed_strategy == expected_strategy
+                    and parsed_tid == expected_trade_id
+                ):
+                    matched_stop = stop
+                    break
+                tag_mismatch_stops.append(stop)
+            if matched_stop is None:
+                # Broker has stops on this ticker but none with the
+                # expected (strategy, trade_id) pair. Report each
+                # non-matching stop's actual tag so the operator can
+                # investigate what's really protecting the position.
+                mismatches.append(
+                    {
+                        "case": "protective_stop_tag_mismatch",
+                        "ticker": ticker,
+                        "expected_trade_id": expected_trade_id,
+                        "expected_strategy": expected_strategy,
+                        "expected_client_tag": expected_client_tag,
+                        "broker_stop_tags": [
+                            stop.client_tag for stop in tag_mismatch_stops
+                        ],
+                    }
+                )
+                continue
+            # Tag match confirmed; validate trigger price via exact
+            # Decimal equality (Decision 6). Stop orders carry trigger
+            # in aux_price (auxPrice on IBKR's side); a Decimal("0")
+            # default from a non-STP order or a connector that can't
+            # surface auxPrice is treated as drift so the safety
+            # property holds even when trigger info is missing.
+            broker_trigger = matched_stop.aux_price
+            if broker_trigger != expected_trigger:
+                mismatches.append(
+                    {
+                        "case": "protective_stop_price_drift",
+                        "ticker": ticker,
+                        "expected_trade_id": expected_trade_id,
+                        "expected_strategy": expected_strategy,
+                        "expected_client_tag": expected_client_tag,
+                        "expected_trigger_price": str(expected_trigger),
+                        "broker_trigger_price": str(broker_trigger),
+                        "broker_order_id": matched_stop.broker_order_id,
+                        "broker_perm_id": matched_stop.broker_perm_id,
+                    }
+                )
+
     # ---- 4. status assembly ----
 
     if not mismatches and not events and not broker_positions and not broker_open_orders:

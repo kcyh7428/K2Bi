@@ -337,6 +337,12 @@ class IBKRConnector:
                     submitted_at=None,
                     tif=tif,
                     client_tag=str(getattr(order, "orderRef", "") or ""),
+                    # Q31: surface auxPrice so recovery's protective-
+                    # stop validation can compare against the
+                    # checkpoint's trigger_price. STP children carry
+                    # their trigger in auxPrice; LMT parents leave
+                    # it at 0 and Q31's price-drift check skips them.
+                    aux_price=Decimal(str(getattr(order, "auxPrice", "0") or "0")),
                 )
             )
         return out
