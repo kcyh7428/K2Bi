@@ -1,6 +1,6 @@
 ---
 name: spy-first-paper-smoke
-status: proposed
+status: approved
 strategy_type: hand_crafted
 risk_envelope_pct: 0.005
 regime_filter: []
@@ -16,6 +16,8 @@ date: 2026-04-20
 type: strategy
 origin: k2bi-generate
 up: "[[index]]"
+approved_at: '2026-04-20T13:00:41.556983+00:00'
+approved_commit_sha: fa29808
 ---
 
 ## How This Works
