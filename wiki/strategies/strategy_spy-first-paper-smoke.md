@@ -3,6 +3,7 @@ name: spy-first-paper-smoke
 status: proposed
 strategy_type: hand_crafted
 risk_envelope_pct: 0.005
+regime_filter: []
 order:
   ticker: SPY
   side: buy
@@ -72,5 +73,5 @@ rule tree. This ticket is only a test that the plumbing works.
 ## Open questions before approval
 
 - SPY thesis does not yet exist at wiki/tickers/SPY.md. Phase 3.2 prerequisite: run /invest thesis SPY first. /invest-ship --approve-strategy refuses without it because the bear-case gate reads the thesis_score field.
-- regime_filter omitted by design. This smoke test fires regardless of market regime. When a real rotational strategy spec lands, regime gating gets revisited.
+- regime_filter: [] (empty list) is the explicit Phase 2 representation of "fires unconditionally regardless of market regime" -- the runner treats an empty filter as unconditional, whereas any non-empty list (including the string "none" parsed as a one-element regime name) would gate on a matching current_regime. Satisfies REQUIRED_STRATEGY_FIELDS at approval time. Real regime gating gets revisited when a real rotational strategy spec lands.
 - Phase 2 MVP backtest runs a fixed SMA(20)/SMA(50) crossover against SPY over 2 years. That baseline has no relationship to a pipeline smoke test with no market signal. The backtest capture at raw/backtests/<date>_spy-first-paper-smoke_backtest.md is informational only; sanity-gate thresholds (500% return, -2% max DD, 85% win rate) apply to the SMA baseline, not to this strategy's non-existent rules.
