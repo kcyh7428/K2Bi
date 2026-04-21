@@ -498,6 +498,40 @@ class IBKRConnector:
                 )
                 break
             contract = ib_async.Stock(ticker, "SMART", "USD")
+            # Q35 (2026-04-21): qualify before mark-fetch so the
+            # contract has a populated conId. Without this, Session G
+            # Run 2 logged `Contract Stock(...) can't be hashed
+            # because no 'conId' value exists` and the mark came back
+            # empty, forcing fallback to the approved spec's
+            # rule-derived limit. Qualify failure is non-fatal per
+            # architect Q35 scope: log + skip the ticker, same as any
+            # other mark-fetch error.
+            try:
+                qualified = await _bounded_read(
+                    self,
+                    self._ib.qualifyContractsAsync(contract),
+                    call_name=f"qualify[{ticker}]",
+                    empty=[],
+                )
+            except Exception as exc:
+                LOG.warning(
+                    "qualify failed for %s: %s; mark skipped", ticker, exc
+                )
+                continue
+            # Q35 MiniMax R1 finding #1 (2026-04-21): an empty qualify
+            # response is possible without an exception -- timeout
+            # path returns []; the broker could also reply with no
+            # qualified contracts for a delisted / unrecognized
+            # symbol. Proceeding to reqTickersAsync with conId=0 would
+            # reproduce the Session G "can't be hashed" warning. Skip
+            # the ticker if qualify did not populate conId.
+            if not qualified or not getattr(contract, "conId", 0):
+                LOG.warning(
+                    "qualify returned empty/unqualified for %s; "
+                    "mark skipped",
+                    ticker,
+                )
+                continue
             try:
                 rows = await _bounded_read(
                     self,
