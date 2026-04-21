@@ -570,3 +570,594 @@ class Q39BEmissionTests(unittest.TestCase):
         )
 
 
+class Q39CDivergenceOnNextReconnectTests(unittest.TestCase):
+    """Q39-C: after an assume-fill decision has been journaled, the
+    next reconnect must reconcile the assumption against the broker's
+    actual state. Three outcomes:
+
+        broker confirms the position    -> CATCH_UP, quiet reconcile
+        broker shows different avg      -> CATCH_UP + avg_price_drift
+                                           audit event (no mismatch)
+        broker contradicts the position -> MISMATCH_REFUSED via
+                                           journal_position_missing_at_broker
+                                           (operator decides)
+
+    Also confirms: the existing orderRef-trail matching (R11 trade_id
+    fallback in _match_broker_order) keeps working on top of Q39-B --
+    a broker status event that arrives AFTER the assume-fill decision
+    is simply ignored for pending classification (pending is already
+    terminal) but still contributes to broker state for Phase B diffs.
+    """
+
+    def test_broker_confirms_position_recovers_clean(self):
+        """Run 1 crashed with assume-fill; Run 2 restart: broker now
+        shows the position at the journal's assumed price. Recovery
+        should reconcile quietly (no new events for the cleared
+        pending, no mismatch)."""
+        tail = [
+            _order_submitted_record(),
+            _assumed_filled_record(),
+        ]
+        result = recovery.reconcile(
+            journal_tail=tail,
+            broker_positions=[
+                BrokerPosition(ticker="SPY", qty=10, avg_price=Decimal("500")),
+            ],
+            broker_open_orders=[],
+            broker_order_status=[],
+            now=NOW,
+        )
+        self.assertEqual(result.status, recovery.RecoveryStatus.CATCH_UP)
+        cases = [e.payload.get("case") for e in result.events]
+        self.assertNotIn(
+            "pending_no_broker_counterpart_assumed_filled", cases
+        )
+        self.assertNotIn("pending_no_broker_counterpart", cases)
+        drift_events = [
+            e for e in result.events if e.event_type == "avg_price_drift"
+        ]
+        self.assertEqual(drift_events, [])
+
+    def test_broker_shows_different_avg_surfaces_price_drift(self):
+        """If the broker's true fill price differs from the assumed-
+        fill's limit_price (broker filled better or worse), the
+        existing avg_price_drift audit event surfaces the gap without
+        blocking startup. Drift is an event, not a mismatch."""
+        tail = [
+            _order_submitted_record(limit_price="500"),
+            _assumed_filled_record(assumed_fill_price="500"),
+        ]
+        result = recovery.reconcile(
+            journal_tail=tail,
+            broker_positions=[
+                BrokerPosition(
+                    ticker="SPY", qty=10, avg_price=Decimal("499.50")
+                ),
+            ],
+            broker_open_orders=[],
+            broker_order_status=[],
+            now=NOW,
+        )
+        self.assertEqual(result.status, recovery.RecoveryStatus.CATCH_UP)
+        drift_events = [
+            e for e in result.events if e.event_type == "avg_price_drift"
+        ]
+        self.assertEqual(len(drift_events), 1)
+        self.assertEqual(drift_events[0].payload["ticker"], "SPY")
+        self.assertEqual(
+            drift_events[0].payload["journal_avg_price"], "500"
+        )
+        self.assertEqual(
+            drift_events[0].payload["broker_avg_price"], "499.50"
+        )
+
+    def test_broker_contradicts_position_blocks_startup(self):
+        """If the broker is flat on the reconnect following an
+        assume-fill, Phase B.2 flags journal_position_missing_at_broker
+        and recovery refuses to start. Operator investigates whether
+        the original assumption was wrong or a real exit happened."""
+        tail = [
+            _order_submitted_record(),
+            _assumed_filled_record(),
+        ]
+        result = recovery.reconcile(
+            journal_tail=tail,
+            broker_positions=[],
+            broker_open_orders=[],
+            broker_order_status=[],
+            now=NOW,
+        )
+        self.assertEqual(
+            result.status, recovery.RecoveryStatus.MISMATCH_REFUSED
+        )
+        mismatch_cases = [
+            m.get("case") for m in result.mismatch_reasons
+        ]
+        self.assertIn(
+            "journal_position_missing_at_broker", mismatch_cases
+        )
+
+    def test_broker_shows_partial_qty_undersized_blocks_startup(self):
+        """If the broker only shows some of the assumed quantity, the
+        Q39 assumption was partially wrong. Phase B.2 fires
+        position_undersized_vs_journal and recovery refuses to start
+        so the operator investigates -- silently downsizing would
+        lose track of a real trade."""
+        tail = [
+            _order_submitted_record(qty=10),
+            _assumed_filled_record(qty=10),
+        ]
+        result = recovery.reconcile(
+            journal_tail=tail,
+            broker_positions=[
+                BrokerPosition(ticker="SPY", qty=3, avg_price=Decimal("500")),
+            ],
+            broker_open_orders=[],
+            broker_order_status=[],
+            now=NOW,
+        )
+        self.assertEqual(
+            result.status, recovery.RecoveryStatus.MISMATCH_REFUSED
+        )
+        mismatch_cases = [
+            m.get("case") for m in result.mismatch_reasons
+        ]
+        self.assertIn("position_undersized_vs_journal", mismatch_cases)
+
+    def test_q31_invariant_still_fires_on_assumed_filled_position(self):
+        """Q31 (missing protective stop): Run 1 assumed a fill with
+        stop_loss. Run 2 restart: broker has the position but the
+        stop child is missing (operator cancelled, broker dropped).
+        Q31 must still fire missing_protective_stop on the assumed-
+        filled position -- the same safety net a real fill gets."""
+        tail = [
+            _order_submitted_record(stop_loss="495"),
+            _assumed_filled_record(parent_stop_loss="495"),
+        ]
+        result = recovery.reconcile(
+            journal_tail=tail,
+            broker_positions=[
+                BrokerPosition(ticker="SPY", qty=10, avg_price=Decimal("500")),
+            ],
+            broker_open_orders=[],
+            broker_order_status=[],
+            now=NOW,
+        )
+        mismatch_cases = [
+            m.get("case") for m in result.mismatch_reasons
+        ]
+        self.assertIn("missing_protective_stop", mismatch_cases)
+        self.assertEqual(
+            result.status, recovery.RecoveryStatus.MISMATCH_REFUSED
+        )
+
+    def test_orderref_trail_still_classifies_when_broker_visibility_returns(
+        self,
+    ):
+        """orderRef-trail matching (pre-Q39): a journaled pending with
+        no broker IDs can still match a broker status event via
+        client_tag. Confirm this path still works after Q39-B -- the
+        assume-fill branch must not short-circuit it."""
+        tail = [
+            # Journal has order_submitted WITHOUT broker_perm_id
+            # (submit transport dropped before perm_id came back).
+            _order_submitted_record(broker_perm_id=""),
+        ]
+        # Broker status history reveals the Filled terminal via
+        # client_tag matching (reqCompletedOrdersAsync exposes orderRef
+        # as BrokerOrderStatusEvent.client_tag).
+        filled_status = BrokerOrderStatusEvent(
+            broker_order_id="1000",
+            broker_perm_id="2000000",
+            status="Filled",
+            filled_qty=10,
+            remaining_qty=0,
+            avg_fill_price=Decimal("500"),
+            last_update_at=EARLIER,
+            client_tag="k2bi:spy-rotational:T1",
+        )
+        result = recovery.reconcile(
+            journal_tail=tail,
+            broker_positions=[
+                BrokerPosition(ticker="SPY", qty=10, avg_price=Decimal("500")),
+            ],
+            broker_open_orders=[],
+            broker_order_status=[filled_status],
+            now=NOW,
+        )
+        cases = [e.payload.get("case") for e in result.events]
+        # orderRef-trail hit: classified as pending_filled, NOT
+        # fallback to assume-fill or no-counterpart.
+        self.assertIn("pending_filled", cases)
+        self.assertNotIn(
+            "pending_no_broker_counterpart_assumed_filled", cases
+        )
+        self.assertNotIn("pending_no_broker_counterpart", cases)
+        self.assertEqual(result.status, recovery.RecoveryStatus.CATCH_UP)
+
+    def test_q31_recognizes_aged_out_assumed_fill_stop_loss(self):
+        """MiniMax R1 finding (2026-04-21): on Run 2+ restart, the
+        original order_submitted has aged out; the only surviving stop
+        metadata is in the assumed-fill event's journal_view. Phase
+        B.3 must walk recovery_reconciled(assumed_filled) records in
+        journal_tail as parent candidates or Q31 spuriously fires
+        missing_protective_stop on a correctly-protected position."""
+        tail = [_assumed_filled_record(parent_stop_loss="495")]
+        broker_positions = [
+            BrokerPosition(ticker="SPY", qty=10, avg_price=Decimal("500")),
+        ]
+        stop_child = BrokerOpenOrder(
+            broker_order_id="1001",
+            broker_perm_id="2000001",
+            ticker="SPY",
+            side="sell",
+            qty=10,
+            filled_qty=0,
+            limit_price=Decimal("0"),
+            status="Submitted",
+            tif="GTC",
+            client_tag="k2bi:spy-rotational:T1:stop",
+            aux_price=Decimal("495"),
+        )
+        result = recovery.reconcile(
+            journal_tail=tail,
+            broker_positions=broker_positions,
+            broker_open_orders=[stop_child],
+            broker_order_status=[],
+            now=NOW,
+        )
+        q31_cases = {
+            "missing_protective_stop",
+            "protective_stop_tag_mismatch",
+            "protective_stop_price_drift",
+        }
+        q31_hits = [
+            m for m in result.mismatch_reasons if m.get("case") in q31_cases
+        ]
+        self.assertEqual(q31_hits, [])
+        self.assertEqual(result.status, recovery.RecoveryStatus.CATCH_UP)
+
+    def test_q31_recognizes_fresh_assumed_fill_stop_loss(self):
+        """MiniMax R1 companion case: Run 1 synthesizes the assumed-
+        fill event in this pass. Phase B.3's events-walk must pick up
+        the stop_loss from journal_view so Q31 validates correctly."""
+        tail = [_order_submitted_record(stop_loss="495")]
+        broker_positions = [
+            BrokerPosition(ticker="SPY", qty=10, avg_price=Decimal("500")),
+        ]
+        stop_child = BrokerOpenOrder(
+            broker_order_id="1001",
+            broker_perm_id="2000001",
+            ticker="SPY",
+            side="sell",
+            qty=10,
+            filled_qty=0,
+            limit_price=Decimal("0"),
+            status="Submitted",
+            tif="GTC",
+            client_tag="k2bi:spy-rotational:T1:stop",
+            aux_price=Decimal("495"),
+        )
+        result = recovery.reconcile(
+            journal_tail=tail,
+            broker_positions=broker_positions,
+            broker_open_orders=[stop_child],
+            broker_order_status=[],
+            now=NOW,
+        )
+        q31_cases = {
+            "missing_protective_stop",
+            "protective_stop_tag_mismatch",
+            "protective_stop_price_drift",
+        }
+        q31_hits = [
+            m for m in result.mismatch_reasons if m.get("case") in q31_cases
+        ]
+        self.assertEqual(q31_hits, [])
+        cases = [e.payload.get("case") for e in result.events]
+        self.assertIn(
+            "pending_no_broker_counterpart_assumed_filled", cases
+        )
+        self.assertEqual(result.status, recovery.RecoveryStatus.CATCH_UP)
+
+    def test_q39_checkpoint_carries_assumed_fill_stop_for_next_run(self):
+        """build_expected_stop_children must emit a stop entry for an
+        assumed-filled position so the Run 2 -> Run 3 hop preserves
+        protective-stop identity through engine_recovered checkpoints."""
+        tail = [_order_submitted_record(stop_loss="495")]
+        broker_positions = [
+            BrokerPosition(ticker="SPY", qty=10, avg_price=Decimal("500")),
+        ]
+        reco = recovery.reconcile(
+            journal_tail=tail,
+            broker_positions=broker_positions,
+            broker_open_orders=[],
+            broker_order_status=[],
+            now=NOW,
+        )
+        out = recovery.build_expected_stop_children(
+            positions=broker_positions,
+            journal_tail=tail,
+            recovery_events=reco.events,
+        )
+        self.assertEqual(len(out), 1)
+        entry = out[0]
+        self.assertEqual(entry["ticker"], "SPY")
+        self.assertEqual(entry["parent_trade_id"], "T1")
+        self.assertEqual(entry["trigger_price"], "495")
+        self.assertEqual(entry["client_tag"], "spy-rotational:T1:stop")
+
+    def test_market_order_without_limit_price_flags_unknown(self):
+        """MiniMax R2 finding (2026-04-21): pending.limit_price=None
+        must not silently use Decimal('0') as the synthetic fill
+        price -- that corrupts projected avg_price. Reviewer-preferred
+        fix: omit the synthetic delta and flag fill_price_unknown:
+        true for the audit trail. Downstream Phase B.2 then surfaces
+        the real divergence via phantom_position or
+        journal_position_missing_at_broker rather than a bogus
+        zero-cost fill."""
+        tail = [
+            _order_submitted_record(
+                broker_perm_id="2000000", limit_price=None
+            )
+        ]
+        result = recovery.reconcile(
+            journal_tail=tail,
+            broker_positions=[
+                BrokerPosition(ticker="SPY", qty=10, avg_price=Decimal("500")),
+            ],
+            broker_open_orders=[],
+            broker_order_status=[],
+            now=NOW,
+        )
+        assumed = [
+            e for e in result.events
+            if e.payload.get("case")
+            == "pending_no_broker_counterpart_assumed_filled"
+        ]
+        self.assertEqual(len(assumed), 1)
+        self.assertTrue(
+            assumed[0].payload.get("fill_price_unknown", False),
+            "assume-fill with None limit_price must flag "
+            "fill_price_unknown: true for audit trail",
+        )
+        self.assertNotIn(
+            "avg_fill_price",
+            assumed[0].payload,
+            "avg_fill_price must be omitted when fill_price_unknown "
+            "(Round 2 finding #2)",
+        )
+        drift_events = [
+            e for e in result.events if e.event_type == "avg_price_drift"
+        ]
+        self.assertEqual(drift_events, [])
+        # Round 4 finding #1 strengthening: since the synthetic delta
+        # is skipped, projected_by_ticker has no SPY entry. Phase B.2
+        # MUST fire phantom_position against the broker's real 10-share
+        # holding -- the reviewer hypothesized Phase B.2 had no symmetric
+        # path here; this assertion pins the existing behavior so a
+        # future regression removing the catch would break the test.
+        mismatch_cases = [m.get("case") for m in result.mismatch_reasons]
+        self.assertIn("phantom_position", mismatch_cases)
+        self.assertEqual(
+            result.status, recovery.RecoveryStatus.MISMATCH_REFUSED
+        )
+
+    def test_orphaned_stop_child_after_assumed_fill_flagged_phantom(self):
+        """MiniMax Round 2 finding #1 (2026-04-21, HIGH): if the
+        assume-fill was wrong (parent rejected post-perm-id; broker
+        reality is no position) BUT a stop child survives at the
+        broker under the same trade_id, Phase B.1 must NOT silently
+        recognize it via pending_trade_ids. Recognition must require
+        the broker to actually hold the assumed-filled position."""
+        tail = [_order_submitted_record(broker_perm_id="2000000")]
+        stop_child = BrokerOpenOrder(
+            broker_order_id="1001",
+            broker_perm_id="2000001",
+            ticker="SPY",
+            side="sell",
+            qty=10,
+            filled_qty=0,
+            limit_price=Decimal("0"),
+            status="Submitted",
+            tif="GTC",
+            client_tag="k2bi:spy-rotational:T1:stop",
+            aux_price=Decimal("495"),
+        )
+        result = recovery.reconcile(
+            journal_tail=tail,
+            broker_positions=[],
+            broker_open_orders=[stop_child],
+            broker_order_status=[],
+            now=NOW,
+        )
+        mismatch_cases = [
+            m.get("case") for m in result.mismatch_reasons
+        ]
+        self.assertIn("phantom_open_order", mismatch_cases)
+        self.assertEqual(
+            result.status, recovery.RecoveryStatus.MISMATCH_REFUSED
+        )
+        recognition_events = [
+            e for e in result.events
+            if e.payload.get("case")
+            in {"stop_child_recognized", "managed_order_recognized"}
+        ]
+        self.assertEqual(
+            recognition_events,
+            [],
+            "stop child of an assumed-filled parent with no broker "
+            "position must NOT be silently recognized",
+        )
+
+    def test_assumed_sell_with_broker_still_long_fires_phantom(self):
+        """MiniMax R5 finding #1 regression guard (2026-04-21): for an
+        assumed SELL fill where broker reality is the long still
+        exists (sell didn't happen), Phase B.2's primary loop over
+        broker_by_ticker must fire phantom_position. The reviewer
+        hypothesized the negative delta would zero-pop projected and
+        hide the divergence; that path is real (projected pops), but
+        the broker-side loop catches broker-held SPY with no projected
+        entry independently. Pin the correct behavior here so a
+        future regression that moves the phantom_position check into
+        the projected-side loop would break the test."""
+        tail = [
+            _order_submitted_record(
+                side="sell", broker_perm_id="2000000"
+            )
+        ]
+        result = recovery.reconcile(
+            journal_tail=tail,
+            broker_positions=[
+                BrokerPosition(ticker="SPY", qty=10, avg_price=Decimal("500")),
+            ],
+            broker_open_orders=[],
+            broker_order_status=[],
+            now=NOW,
+        )
+        self.assertEqual(
+            result.status, recovery.RecoveryStatus.MISMATCH_REFUSED
+        )
+        mismatch_cases = [m.get("case") for m in result.mismatch_reasons]
+        self.assertIn("phantom_position", mismatch_cases)
+
+    def test_assumed_fill_with_broker_position_recognizes_stop_child(self):
+        """Companion to the orphan test: when broker DOES hold the
+        assumed-filled position, the stop child IS legitimate and
+        must be recognized. Without this assertion, the fix for the
+        orphan case could over-correct and refuse valid recoveries."""
+        tail = [_order_submitted_record(broker_perm_id="2000000")]
+        stop_child = BrokerOpenOrder(
+            broker_order_id="1001",
+            broker_perm_id="2000001",
+            ticker="SPY",
+            side="sell",
+            qty=10,
+            filled_qty=0,
+            limit_price=Decimal("0"),
+            status="Submitted",
+            tif="GTC",
+            client_tag="k2bi:spy-rotational:T1:stop",
+            aux_price=Decimal("495"),
+        )
+        result = recovery.reconcile(
+            journal_tail=tail,
+            broker_positions=[
+                BrokerPosition(ticker="SPY", qty=10, avg_price=Decimal("500")),
+            ],
+            broker_open_orders=[stop_child],
+            broker_order_status=[],
+            now=NOW,
+        )
+        mismatch_cases = [
+            m.get("case") for m in result.mismatch_reasons
+        ]
+        self.assertNotIn("phantom_open_order", mismatch_cases)
+        recognition_events = [
+            e for e in result.events
+            if e.payload.get("case")
+            in {"stop_child_recognized", "managed_order_recognized"}
+        ]
+        self.assertEqual(len(recognition_events), 1)
+
+    def test_cross_run_projected_position_not_doubled(self):
+        """MiniMax R3 finding #1 regression guard (2026-04-21): after
+        Run 1 emits the assume-fill event and its record is now in
+        journal_tail, Run 2's reconcile must NOT double-count the
+        position. Run 1's Phase A emits the event + synthetic delta;
+        Run 2 has the event already in tail, so Phase A's implied_pending
+        is empty (terminal cleared it) and _positions_from_journal picks
+        up the fill. Projected should be (qty=10, avg=500), not
+        (qty=20) or (qty=40)."""
+        # Run 1 view: only order_submitted in journal, broker flat.
+        run1_tail = [_order_submitted_record()]
+        run1 = recovery.reconcile(
+            journal_tail=run1_tail,
+            broker_positions=[
+                BrokerPosition(ticker="SPY", qty=10, avg_price=Decimal("500")),
+            ],
+            broker_open_orders=[],
+            broker_order_status=[],
+            now=NOW,
+        )
+        run1_adopted = {p.ticker: (p.qty, p.avg_price) for p in run1.adopted_positions}
+        self.assertEqual(run1_adopted, {"SPY": (10, Decimal("500"))})
+
+        # Run 2 view: journal now has BOTH the original order_submitted
+        # AND the assume-fill event that Run 1 wrote. Replay must not
+        # double the position.
+        run2_tail = [_order_submitted_record(), _assumed_filled_record()]
+        run2 = recovery.reconcile(
+            journal_tail=run2_tail,
+            broker_positions=[
+                BrokerPosition(ticker="SPY", qty=10, avg_price=Decimal("500")),
+            ],
+            broker_open_orders=[],
+            broker_order_status=[],
+            now=NOW,
+        )
+        run2_adopted = {p.ticker: (p.qty, p.avg_price) for p in run2.adopted_positions}
+        self.assertEqual(run2_adopted, {"SPY": (10, Decimal("500"))})
+        # MiniMax R4 finding #2: assert Phase B.2 produced no
+        # mismatches AND status is CATCH_UP. A double-count regression
+        # could leave adopted_positions matching broker (broker caps
+        # reality) while Phase B.2 silently flagged position_oversized.
+        # Checking only the endpoint would miss that; assert the
+        # safety path too.
+        self.assertEqual(run2.mismatch_reasons, [])
+        self.assertEqual(
+            run2.status, recovery.RecoveryStatus.CATCH_UP
+        )
+
+    def test_assumed_filled_replay_idempotent(self):
+        """Running recovery twice with the same assume-fill history
+        produces the same CATCH_UP outcome -- no duplicate events, no
+        double-counted positions. Critical because the engine restarts
+        can happen at any cadence.
+
+        MiniMax R3 finding #2 (2026-04-21): extended to assert on
+        adopted_positions + mismatch_reasons so regressions that
+        corrupt position tracking are caught even when sorted-case
+        equality still holds."""
+        tail = [
+            _order_submitted_record(),
+            _assumed_filled_record(),
+        ]
+        first = recovery.reconcile(
+            journal_tail=tail,
+            broker_positions=[
+                BrokerPosition(ticker="SPY", qty=10, avg_price=Decimal("500")),
+            ],
+            broker_open_orders=[],
+            broker_order_status=[],
+            now=NOW,
+        )
+        second = recovery.reconcile(
+            journal_tail=tail,
+            broker_positions=[
+                BrokerPosition(ticker="SPY", qty=10, avg_price=Decimal("500")),
+            ],
+            broker_open_orders=[],
+            broker_order_status=[],
+            now=NOW,
+        )
+        self.assertEqual(first.status, second.status)
+        self.assertEqual(first.mismatch_reasons, second.mismatch_reasons)
+        first_cases = sorted(
+            str(e.payload.get("case")) for e in first.events
+        )
+        second_cases = sorted(
+            str(e.payload.get("case")) for e in second.events
+        )
+        self.assertEqual(first_cases, second_cases)
+        # MiniMax R3 finding #2: also assert adopted_positions are
+        # identical -- a silent double-count would corrupt position
+        # state even when sorted-case equality still holds.
+        first_adopted = {
+            p.ticker: (p.qty, p.avg_price) for p in first.adopted_positions
+        }
+        second_adopted = {
+            p.ticker: (p.qty, p.avg_price) for p in second.adopted_positions
+        }
+        self.assertEqual(first_adopted, second_adopted)
+        self.assertEqual(first_adopted, {"SPY": (10, Decimal("500"))})
