@@ -604,9 +604,15 @@ class CorruptJournalFieldsTolerantTests(unittest.TestCase):
             broker_order_status=[],
             now=NOW,
         )
-        # pending_no_broker_counterpart event emitted without crash.
+        # Q39-B (2026-04-21): broker_perm_id="2000000" in the journal
+        # record makes this the assume-fill path, not the original
+        # pending_no_broker_counterpart. The test's intent -- corrupt
+        # limit_price does not raise -- stands; the case name reflects
+        # the new branch's classification.
         cases = [e.payload.get("case") for e in result.events]
-        self.assertIn("pending_no_broker_counterpart", cases)
+        self.assertIn(
+            "pending_no_broker_counterpart_assumed_filled", cases
+        )
 
 
 class StopLossPreservedThroughRecoveryTests(unittest.TestCase):
@@ -1256,7 +1262,12 @@ class IdentityMatchingTests(unittest.TestCase):
         self.assertIn("pending_filled", cases)
 
     def test_pending_no_broker_counterpart(self):
-        tail = _journal_pending()
+        # Q39-B (2026-04-21): broker_perm_id="" signals broker never
+        # acknowledged the order -- no evidence broker accepted, keep
+        # the original pending_no_broker_counterpart case. With perm_id
+        # set, the assume-fill path fires instead (covered in the Q39
+        # suite at tests/test_engine_recovery_q39.py).
+        tail = _journal_pending(broker_perm_id="")
         result = recovery.reconcile(
             journal_tail=tail,
             broker_positions=[],
@@ -1264,11 +1275,12 @@ class IdentityMatchingTests(unittest.TestCase):
             broker_order_status=[],
             now=NOW,
         )
-        # No phantom position + no phantom order; journal-pending
-        # without broker trace is a clean catch-up case.
         self.assertEqual(result.status, recovery.RecoveryStatus.CATCH_UP)
         cases = [e.payload.get("case") for e in result.events]
         self.assertIn("pending_no_broker_counterpart", cases)
+        self.assertNotIn(
+            "pending_no_broker_counterpart_assumed_filled", cases
+        )
 
 
 class ExpectedStopChildrenCheckpointTests(unittest.TestCase):
@@ -2683,7 +2695,13 @@ class ProtectiveStopInvariantTests(unittest.TestCase):
         has a fresh T-new parent for same ticker. Broker shows
         T-new's stop correctly -- the old T-old entry is stale and
         must NOT validate (would spuriously fire missing/tag_mismatch
-        and block startup)."""
+        and block startup).
+
+        2026-04-21: adopted_positions cleared in the checkpoint so
+        that Q39's synthetic-fill delta for T-new (pending_filled
+        case) does not stack on top of a stale 10-share snapshot that
+        has no matching broker position. Q31 suppression is driven by
+        expected_stop_children, not adopted_positions."""
         prior_checkpoint = {
             "ts": EARLIER.isoformat(),
             "event_type": "engine_recovered",
@@ -2694,9 +2712,7 @@ class ProtectiveStopInvariantTests(unittest.TestCase):
             "payload": {
                 "status": "catch_up",
                 "reconciled_event_count": 0,
-                "adopted_positions": [
-                    {"ticker": "SPY", "qty": 10, "avg_price": "500"}
-                ],
+                "adopted_positions": [],
                 "expected_stop_children": [
                     {
                         "ticker": "SPY",
@@ -2727,7 +2743,10 @@ class ProtectiveStopInvariantTests(unittest.TestCase):
                 "submitted_at": datetime(2026, 5, 5, 11, 45, tzinfo=timezone.utc).isoformat(),
             },
         }
-        # Broker: position and T-new's stop (no T-old stop left).
+        # Broker: T-new parent filled + T-new's stop at broker (no
+        # T-old stop left). T-new's Filled status is provided via
+        # broker_order_status so recovery classifies as pending_filled
+        # rather than Q39-B's assume-fill path (2026-04-21 update).
         new_stop = BrokerOpenOrder(
             broker_order_id="2001",
             broker_perm_id="3000001",
@@ -2741,13 +2760,24 @@ class ProtectiveStopInvariantTests(unittest.TestCase):
             client_tag="k2bi:spy-strat:T-new:stop",
             aux_price=Decimal("498.50"),
         )
+        t_new_parent_filled = BrokerOrderStatusEvent(
+            broker_order_id="2000",
+            broker_perm_id="3000000",
+            status="Filled",
+            filled_qty=10,
+            remaining_qty=0,
+            avg_fill_price=Decimal("502"),
+            last_update_at=datetime(
+                2026, 5, 5, 11, 46, tzinfo=timezone.utc
+            ),
+        )
         result = recovery.reconcile(
             journal_tail=[prior_checkpoint, fresh_parent],
             broker_positions=[
                 BrokerPosition(ticker="SPY", qty=10, avg_price=Decimal("502"))
             ],
             broker_open_orders=[new_stop],
-            broker_order_status=[],
+            broker_order_status=[t_new_parent_filled],
             now=NOW,
         )
         self.assertEqual(result.status, recovery.RecoveryStatus.CATCH_UP)

@@ -216,6 +216,27 @@ def reconcile(
     trade_id_to_open = _index_open_orders_by_trade_id(broker_open_orders)
     trade_id_to_status = _index_status_events_by_trade_id(broker_order_status)
 
+    # Q39-B: the --once pre-exit barrier (Q33) writes
+    # once_exit_barrier_timeout events when it times out waiting on a
+    # pending order's terminal status. When recovery sees such an event
+    # referencing a trade_id that later turns up with no broker
+    # counterpart, it is the strongest-tier evidence we have that the
+    # order was live at the broker before the engine exited. Recorded
+    # as evidence=barrier_timeout in the assumed-fill event; absence
+    # defaults to crash_gap.
+    #
+    # MiniMax R3 finding #3 (2026-04-21): the evidence field is AUDIT
+    # ONLY. Recovery does NOT branch on barrier_timeout vs crash_gap
+    # for delta computation, phantom detection, or any other capital-
+    # path decision. The field exists so operators can distinguish
+    # deliberate-exit from crash-cause when reviewing mismatch
+    # journals; it must NOT be relied upon as an operational trust
+    # signal. A future architect decision to strengthen the
+    # barrier_timeout path (e.g., reduced-position delta, different
+    # mismatch severity) requires an explicit design change, not a
+    # drive-by branch added here.
+    barrier_timeout_trade_ids = _barrier_timeout_trade_ids(journal_tail)
+
     for pending in implied_pending:
         match = _match_broker_order(
             pending,
@@ -225,31 +246,101 @@ def reconcile(
             trade_id_status_index=trade_id_to_status,
         )
         if match is None:
-            # Journal said "submitted", broker knows nothing. Could be
-            # a) the order never actually left (engine crashed between
-            # submit-intent and broker ack) OR b) a broker-side gap.
-            # Either way, mark as "cancelled-by-crash" reconciliation
-            # so the pending cleanly clears; if it later resurfaces
-            # with broker ack, the fresh order_submitted event will
-            # show up in the same window.
-            events.append(
-                ReconciliationEvent(
-                    event_type="recovery_reconciled",
-                    payload={
-                        "case": "pending_no_broker_counterpart",
-                        "note": (
-                            "journal-pending order never reached broker or "
-                            "broker-side record missing"
-                        ),
-                        "journal_view": _pending_payload(pending),
-                    },
-                    trade_id=pending.trade_id,
-                    strategy=pending.strategy,
-                    broker_order_id=pending.broker_order_id,
-                    broker_perm_id=pending.broker_perm_id,
-                    ticker=pending.ticker,
+            # Q39-B / Q36: journal said submitted; broker knows nothing.
+            # Branch on broker_perm_id:
+            #   present -> perm_id is broker's accept-ack. Engine either
+            #              crashed post-ack (crash_gap) or deliberately
+            #              exited during the Q33 --once barrier wait
+            #              (barrier_timeout). Hybrid rule (Q39 Option 1
+            #              + Option 3): assume filled, synthesize a
+            #              fill into reconciliation_deltas at the
+            #              journal's limit_price so projected positions
+            #              match broker's actual state (post-Gateway-
+            #              restart visibility gap). If the assumption
+            #              is wrong, Phase B.2 fires
+            #              journal_position_missing_at_broker on the
+            #              next reconnect -- divergence detection.
+            #   absent  -> no evidence broker ever accepted the order.
+            #              Could be pre-ack engine crash, transport
+            #              failure, or reject-before-perm-id. Preserve
+            #              the original pending_no_broker_counterpart
+            #              case so projected positions stay unchanged.
+            if pending.broker_perm_id:
+                evidence = (
+                    "barrier_timeout"
+                    if pending.trade_id
+                    and pending.trade_id in barrier_timeout_trade_ids
+                    else "crash_gap"
                 )
-            )
+                # Q39-B (MiniMax R2 2026-04-21): a None limit_price
+                # means the journal has no price signal for the
+                # synthetic fill. Silently substituting Decimal("0")
+                # would corrupt the projected avg_price and mask real
+                # divergence behind a bogus zero-cost basis. Flag the
+                # unknown price in the audit payload AND skip the
+                # synthetic delta so Phase B.2 surfaces the divergence
+                # via phantom_position or journal_position_missing_at_broker.
+                fill_price_unknown = pending.limit_price is None
+                assumed_fill_price = (
+                    pending.limit_price
+                    if pending.limit_price is not None
+                    else Decimal("0")
+                )
+                payload: dict[str, Any] = {
+                    "case": "pending_no_broker_counterpart_assumed_filled",
+                    "evidence": evidence,
+                    "note": (
+                        "journal had broker_perm_id; broker "
+                        "visibility limited (Q39); defaulting "
+                        "to assume fill"
+                    ),
+                    "journal_view": _pending_payload(pending),
+                    "filled_qty": pending.qty,
+                }
+                if fill_price_unknown:
+                    # MiniMax R2 finding #2 (2026-04-21): omit the
+                    # avg_fill_price field entirely rather than
+                    # persisting a "0" sentinel that could surface as
+                    # real data under an override bypass path. The
+                    # fill_price_unknown flag is sufficient for audit.
+                    payload["fill_price_unknown"] = True
+                else:
+                    payload["avg_fill_price"] = str(assumed_fill_price)
+                events.append(
+                    ReconciliationEvent(
+                        event_type="recovery_reconciled",
+                        payload=payload,
+                        trade_id=pending.trade_id,
+                        strategy=pending.strategy,
+                        broker_order_id=pending.broker_order_id,
+                        broker_perm_id=pending.broker_perm_id,
+                        ticker=pending.ticker,
+                    )
+                )
+                if pending.qty > 0 and not fill_price_unknown:
+                    sign = 1 if pending.side == "buy" else -1
+                    reconciliation_deltas.setdefault(
+                        pending.ticker, []
+                    ).append((sign * pending.qty, assumed_fill_price))
+            else:
+                events.append(
+                    ReconciliationEvent(
+                        event_type="recovery_reconciled",
+                        payload={
+                            "case": "pending_no_broker_counterpart",
+                            "note": (
+                                "journal-pending order never reached "
+                                "broker or broker-side record missing"
+                            ),
+                            "journal_view": _pending_payload(pending),
+                        },
+                        trade_id=pending.trade_id,
+                        strategy=pending.strategy,
+                        broker_order_id=pending.broker_order_id,
+                        broker_perm_id=pending.broker_perm_id,
+                        ticker=pending.ticker,
+                    )
+                )
             continue
 
         kind, obj = match
@@ -351,8 +442,19 @@ def reconcile(
     # Also treat trade_ids observed in journal fills (parent already
     # filled + cleared) as "ours" so their surviving stop children do
     # not flag phantoms.
+    #
+    # Q39-B (MiniMax R1 + R2 2026-04-21): assume-fill trade_ids are
+    # tracked SEPARATELY. R2 finding #1: silently recognizing a stop
+    # child via pending_trade_ids when the assume-fill assumption was
+    # wrong leaves an orphaned stop live at the broker, ready to
+    # trigger on unrelated price movement. Recognition for an
+    # assume-fill trade_id requires the broker to still hold the
+    # corresponding position; otherwise the stop is orphaned and must
+    # fall through to phantom detection.
+    assumed_fill_trade_ids: set[str] = set()
     for rec in journal_tail:
-        if rec.get("event_type") in {
+        event_type = rec.get("event_type")
+        if event_type in {
             "order_submitted",
             "order_filled",
             "order_proposed",
@@ -360,6 +462,28 @@ def reconcile(
             tid = rec.get("trade_id")
             if tid:
                 pending_trade_ids.add(tid)
+        elif event_type == "recovery_reconciled":
+            payload = rec.get("payload") or {}
+            if (
+                payload.get("case")
+                == "pending_no_broker_counterpart_assumed_filled"
+            ):
+                tid = rec.get("trade_id")
+                if tid:
+                    assumed_fill_trade_ids.add(tid)
+    # Phase A's freshly-synthesized assume-fill events in this pass
+    # also feed assumed_fill_trade_ids so the orphan gate covers the
+    # Run-1-emission case, not only the Run-2-replay case.
+    for ev in events:
+        if ev.event_type != "recovery_reconciled":
+            continue
+        ev_payload = ev.payload or {}
+        if (
+            ev_payload.get("case")
+            == "pending_no_broker_counterpart_assumed_filled"
+            and ev.trade_id
+        ):
+            assumed_fill_trade_ids.add(ev.trade_id)
 
     # Q32: seed from the most recent engine_recovered checkpoint's
     # expected_stop_children. Rationale: a spec that allows multi-day
@@ -456,8 +580,64 @@ def reconcile(
             # only protects positions we currently hold.
             and open_order.ticker in broker_position_tickers
         )
+        # Q39-B MiniMax R2 finding #1 (2026-04-21): assume-fill trade
+        # ids are eligible for recognition ONLY when the broker still
+        # holds the corresponding position. Without this gate, a
+        # stop child whose assumed-filled parent never materialized at
+        # broker would be silently recognized, leaving a live GTC stop
+        # ready to trigger on unrelated price movement.
+        #
+        # The orphan check runs BEFORE pending_trade_ids recognition
+        # because a trade_id can be in both sets (order_submitted
+        # journaled in Run 1 + assume-fill emitted in this pass); the
+        # pending-path recognition would otherwise fire before the
+        # assume-fill gate has a say.
+        is_assume_fill_trade = (
+            trade_id is not None and trade_id in assumed_fill_trade_ids
+        )
+        if (
+            is_stop
+            and is_assume_fill_trade
+            and open_order.ticker not in broker_position_tickers
+        ):
+            mismatches.append(
+                {
+                    "case": "phantom_open_order",
+                    "broker_order_id": oid,
+                    "broker_perm_id": perm,
+                    "ticker": open_order.ticker,
+                    "side": open_order.side,
+                    "qty": open_order.qty,
+                    "status": open_order.status,
+                    "client_tag": open_order.client_tag,
+                    "reason": (
+                        "stop_child_orphan_after_assumed_fill: "
+                        "broker has no matching position for the "
+                        "trade_id that recovery assumed-filled; this "
+                        "stop would trigger on unrelated price "
+                        "movement. Operator must review before "
+                        "relaunching."
+                    ),
+                }
+            )
+            continue
+        # Recognition paths:
+        #   - pending_trade_ids: standard journal-pending bracket
+        #     recognition (covers bracket child placed before fill).
+        #   - is_assume_fill_trade + position present: aged-out
+        #     assume-fill where order_submitted no longer in
+        #     journal_tail; recognition holds only when broker
+        #     position confirms the assumption.
+        #   - checkpoint_recognized: Q32 expected_stop_children
+        #     seeding (existing behavior).
+        assume_fill_recognized = (
+            is_assume_fill_trade
+            and open_order.ticker in broker_position_tickers
+        )
         if strategy is not None and trade_id is not None and (
-            trade_id in pending_trade_ids or checkpoint_recognized
+            trade_id in pending_trade_ids
+            or assume_fill_recognized
+            or checkpoint_recognized
         ):
             # Emit a reconciled event so the audit trail records the
             # child's presence; continue -- not a phantom.
@@ -618,20 +798,43 @@ def reconcile(
     journal_parent_by_ticker: dict[str, dict[str, Any]] = {}
     for rec in journal_tail:
         et = rec.get("event_type")
-        if et not in {"order_submitted", "order_filled"}:
-            continue
         payload = rec.get("payload") or {}
-        ticker = rec.get("ticker") or payload.get("ticker")
+        # Q39-B (MiniMax R1 2026-04-21): Phase B.3 must also pick up
+        # stop_loss from a prior run's assumed-fill event when the
+        # original order_submitted has aged out of journal_tail.
+        # Without this, Q31 spuriously fires missing_protective_stop
+        # on a correctly-protected assumed-filled position after one
+        # hop.
+        is_assumed_fill_record = (
+            et == "recovery_reconciled"
+            and payload.get("case")
+            == "pending_no_broker_counterpart_assumed_filled"
+        )
+        if et not in {"order_submitted", "order_filled"} and not is_assumed_fill_record:
+            continue
+        if is_assumed_fill_record:
+            # Stop metadata on assume-fill events lives in
+            # payload.journal_view (mirrors Phase A's _pending_payload
+            # output). Side/ticker likewise.
+            journal_view = payload.get("journal_view") or {}
+            ticker = rec.get("ticker") or journal_view.get("ticker")
+        else:
+            ticker = rec.get("ticker") or payload.get("ticker")
         if not ticker or ticker not in position_tickers_now:
             continue
         trade_id = rec.get("trade_id")
         if not trade_id:
             continue
-        side = (rec.get("side") or payload.get("side") or "").lower()
+        if is_assumed_fill_record:
+            journal_view = payload.get("journal_view") or {}
+            side = str(journal_view.get("side") or "").lower()
+            stop_loss = journal_view.get("stop_loss")
+        else:
+            side = (rec.get("side") or payload.get("side") or "").lower()
+            stop_loss = payload.get("stop_loss")
         if side and side != "buy":
             continue
         strategy = rec.get("strategy")
-        stop_loss = payload.get("stop_loss")
         prior = journal_parent_by_ticker.get(ticker)
         if (
             prior is not None
@@ -646,14 +849,22 @@ def reconcile(
             "trade_id": trade_id,
             "stop_loss": stop_loss,
         }
-    # Also scan the Phase A synthesized events for
-    # recovery_reconciled(case in {pending_filled, pending_partially_filled}):
-    # when the engine crashed between order_proposed and
-    # order_submitted, the ONLY surviving stop metadata lives in
-    # the journal_view payload of this freshly-built event
-    # (Codex Commit-2 R1 P1). Without this scan, Q31 cannot protect
-    # a position first surfaced via broker-status-history recovery.
-    parent_fill_cases = {"pending_filled", "pending_partially_filled"}
+    # Also scan the Phase A synthesized events for recovery_reconciled
+    # events that carry stop metadata in journal_view:
+    #   - pending_filled / pending_partially_filled: engine crashed
+    #     between order_proposed and order_submitted; the only
+    #     surviving stop metadata lives in journal_view (Codex
+    #     Commit-2 R1 P1).
+    #   - pending_no_broker_counterpart_assumed_filled: fresh assume-
+    #     fill emitted in this pass; journal_view holds stop_loss
+    #     from the pending (Q39-B, MiniMax R1 2026-04-21). Without
+    #     the scan, the checkpoint written in this pass' engine_recovered
+    #     would be empty for assume-filled positions.
+    parent_fill_cases = {
+        "pending_filled",
+        "pending_partially_filled",
+        "pending_no_broker_counterpart_assumed_filled",
+    }
     for ev in events:
         if ev.event_type != "recovery_reconciled":
             continue
@@ -966,7 +1177,18 @@ def _positions_from_journal(
             )
         elif event_type == "recovery_reconciled":
             case = payload.get("case")
-            if case not in {"pending_filled", "pending_partially_filled"}:
+            # Q39-A: pending_no_broker_counterpart_assumed_filled is
+            # treated as a synthetic fill -- journal says we submitted
+            # with a broker_perm_id, broker visibility can't see it,
+            # so the hybrid rule assumes fill and projects the
+            # position. If the assumption is wrong, Phase B.2's
+            # journal_position_missing_at_broker fires on the next
+            # reconcile (Q39 divergence detection).
+            if case not in {
+                "pending_filled",
+                "pending_partially_filled",
+                "pending_no_broker_counterpart_assumed_filled",
+            }:
                 continue
             ticker = rec.get("ticker") or payload.get("ticker")
             side = payload.get("journal_view", {}).get("side")
@@ -1044,6 +1266,13 @@ def _pending_from_journal(
         "pending_rejected",
         "pending_partially_filled",  # remainder-only reconciliation
         "pending_no_broker_counterpart",
+        # Q39-A: once recovery has ASSUMED a fill for a pending order
+        # (journal had broker_perm_id; broker visibility can't see it),
+        # subsequent restarts must treat the decision as final. Without
+        # this, the same order would be re-reconciled every restart
+        # and either re-emit pending_no_broker_counterpart or stack
+        # synthetic fills into projected positions.
+        "pending_no_broker_counterpart_assumed_filled",
     }
     for rec in records:
         event_type = rec.get("event_type")
@@ -1331,6 +1560,40 @@ def _parse_ts(raw: Any) -> datetime | None:
         return None
 
 
+def _barrier_timeout_trade_ids(
+    journal_tail: Iterable[dict[str, Any]],
+) -> set[str]:
+    """Collect trade_ids referenced by any once_exit_barrier_timeout
+    event in the journal tail.
+
+    Q33 (architect 2026-04-21): the engine's --once pre-exit barrier
+    writes this event when it times out waiting on a pending order's
+    terminal status. Q39-B (this file) reads the set to decide the
+    evidence tier for the assumed-fill path: barrier_timeout ->
+    strongest (engine deliberately exited mid-wait); absent ->
+    crash_gap (engine crashed without the barrier running, weaker).
+
+    Defensive parsing: malformed records contribute nothing. Callers
+    must treat an empty set as "no barrier evidence anywhere" (same as
+    no event at all).
+    """
+    out: set[str] = set()
+    for rec in journal_tail:
+        if rec.get("event_type") != "once_exit_barrier_timeout":
+            continue
+        payload = rec.get("payload") or {}
+        orders = payload.get("pending_orders")
+        if not isinstance(orders, list):
+            continue
+        for order in orders:
+            if not isinstance(order, dict):
+                continue
+            tid = order.get("trade_id")
+            if isinstance(tid, str) and tid:
+                out.add(tid)
+    return out
+
+
 def _latest_checkpoint_stop_children(
     journal_tail: Iterable[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -1499,7 +1762,15 @@ def build_expected_stop_children(
     # such positions, and the next restart would flag the live stop
     # child as phantom_open_order.
     if recovery_events:
-        parent_fill_cases = {"pending_filled", "pending_partially_filled"}
+        # Q39-B (MiniMax R1 2026-04-21): include the assume-fill case
+        # so a fresh recovery pass' engine_recovered checkpoint carries
+        # the assumed-filled position's protective-stop identity
+        # forward to subsequent restarts.
+        parent_fill_cases = {
+            "pending_filled",
+            "pending_partially_filled",
+            "pending_no_broker_counterpart_assumed_filled",
+        }
         for ev in recovery_events:
             if ev.event_type != "recovery_reconciled":
                 continue
