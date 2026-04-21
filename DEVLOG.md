@@ -3,6 +3,29 @@
 Session-by-session ship log. Append-only. New entries on top.
 
 
+## 2026-04-21 -- CLAUDE.md reframe: Keith-specific to product/user-role
+
+**Commit:** `6bfee80` docs(claude-md): reframe identity from Keith-specific to product/user-role
+
+**What shipped:** Top-level CLAUDE.md rewrite to match the operational architecture's product framing. K2Bi treats itself as a standalone shareable project (own repo, own skills, portable memory) but the prose opened with a Keith biography and carried 18 "Keith" name references throughout. Replaced with a "Who The User Is" role section (senior operator deep in own domain, new to markets, not assumed native-English-speaking, $500-$5K capital ceiling, learning trading as they use the system). All 18 "Keith" mentions swapped to "the user" / "the operator." Origin tag `keith` preserved as legacy frontmatter value with an explanation in place so existing vault content is not invalidated. Added a top-level Rule requiring plain-English glosses or `[[glossary]]` links on every first-use trading term (alpha, beta, drawdown, sharpe, duration, gamma, crossover, breakout, RSI, etc.) so the pedagogical layer is named in the rules section, not only in Teach Mode. Added a one-line `/invest kill` + `.killed` lifecycle note in Execution Layer Isolation so the kill-switch user-facing path is discoverable without vault access.
+
+The rewrite also enforces the file's own Memory Layer Ownership rule ("no procedural content in CLAUDE.md -- how-to lives in the skill that does X"). Four sections violated the rule and were reduced to pointers: Teach Mode (50 lines -> 3 paragraphs pointing at [[wiki/context/teach-mode]]), Codex Adversarial Review + Review Discipline Split (70 lines -> 3 paragraphs pointing at invest-ship SKILL.md and [[wiki/context/review-discipline]]), Strategy & Execution Pipeline Phase 4+ stub (duplicated roadmap.md -> deleted), Phase Gates summary (duplicated roadmap.md -> deleted). One stale section (Slash Commands "pending Phase 1 Session 2" when Phase 3.5 has shipped) was deleted entirely; skills are auto-discovered at session start. Companion docs created in K2Bi-Vault (Syncthing, not git-tracked): `wiki/context/teach-mode.md` with the full Teach Mode procedure (behavior-by-stage table, glossary stub pattern, dial bash one-liner, scope boundaries) and `wiki/context/review-discipline.md` with the per-surface rigor split (aggressive-iteration surfaces vs one-pass-then-fix surfaces, ambiguous-case decision rule). Also committed `proposals/2026-04-21_claude-md-revision.md` as the design-rationale audit trail.
+
+Line count: CLAUDE.md 343 -> 190 (80 insertions, 232 deletions in git diff). File size 25.9 KB -> 13 KB. "Keith" name references: 18 -> 0.
+
+**Review:** MiniMax M2.7 pre-commit review ran once via `scripts/minimax-review.sh --scope diff --files CLAUDE.md` (archive `.minimax-reviews/2026-04-21T11-46-35Z_diff.json`). Verdict: NEEDS-ATTENTION with 5 findings triaged as follows:
+
+- Finding 1 [HIGH] broken [[wiki/context/teach-mode]] link: FALSE POSITIVE. Reviewer only saw the CLAUDE.md diff, not the vault. `K2Bi-Vault/wiki/context/teach-mode.md` exists (created in the same change, vault-side).
+- Finding 2 [HIGH] broken [[wiki/context/review-discipline]] link: FALSE POSITIVE for the same reason. `K2Bi-Vault/wiki/context/review-discipline.md` exists.
+- Finding 3 [MEDIUM] single-writer rationale lost: ALREADY PRESERVED in the Memory Layer Ownership table's "Single-writer hubs" consequence ("wiki/log.md and the wiki indexes have exactly one writer script each; no skill appends directly"). The historical K2B-audit-fixes reference is correctly removed in the product-framed rewrite.
+- Finding 4 [MEDIUM] Slash Commands section removed: INTENTIONAL per user decision (stale Session 2 label; skills auto-discovered). The sub-point about `/invest kill` visibility was fair and fixed inline by adding the command + `.killed` lifecycle note to Execution Layer Isolation.
+- Finding 5 [MEDIUM] Phase Gates summary removed: INTENTIONAL per user decision (duplicated roadmap.md). The key safety gate is preserved via "No live funding until Phase 5 metrics pass" in the Environment section.
+
+Codex Checkpoint 2 not run on this commit. Single-reviewer (MiniMax) pass is acceptable for the orchestrator-prose surface per the discipline split committed in this same change (one-pass-then-fix bucket); zero code behavior changed; zero validator / engine / risk / journal surfaces touched.
+
+**Follow-ups:** none. The two new `wiki/context/` docs will sync to the Mac Mini via Syncthing; no code deploy needed.
+
+
 ## 2026-04-20 -- Session G: Phase 3.5 first paper ticket SHIPPED clean
 
 **Commit:** `(DEVLOG-only)` -- Phase 3.5's tangible artifacts are broker-side fills at DUQ220152 (not version-controlled), journal events 8-11 in `K2Bi-Vault/raw/journal/2026-04-20.jsonl` (vault-side, Syncthing), and the 0-byte `.killed` sentinel at `K2Bi-Vault/System/.killed` seeded immediately after the close. This DEVLOG-only commit is the repo-side record of the session.
