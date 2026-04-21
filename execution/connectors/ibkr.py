@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -78,6 +79,88 @@ _DISCONNECT_ERROR_CODES = {504, 1102, 2103} # socket-level / market-data farm
 _ORDER_REJECT_CODES = {201, 202, 203, 399}  # broker order rejection
 
 
+# Q34 (2026-04-21) bounded broker-API calls. Session F's run 3 hung
+# for 3+ minutes on timed-out `open_orders_request` /
+# `completed_orders_request` / `executions_request` after a
+# connectivity flap. Every READ-PATH broker call is wrapped in
+# asyncio.wait_for so the engine degrades cleanly instead of wedging.
+#
+# Split policy (architect-confirmed 2026-04-21):
+#   - Reads (positions, open orders, marks, executions, status
+#     history) return an empty sentinel on timeout. Caller / Q39-B
+#     recovery treat empty results as "broker visibility limited"
+#     (journal-authoritative fallback).
+#   - Connect + account-summary-probe raise DisconnectedError on
+#     timeout. Caller's reconnect/backoff cycle fires. The account
+#     summary is handled as a probe (not a read) because the default
+#     AccountSummary(cash=0, net_liq=0) is ambiguous with a real
+#     zero-balance account and could mislead risk gates (MiniMax
+#     Q34 R1 finding #5).
+#
+# SCOPE LIMITATION (2026-04-21): write-path calls -- submit_order,
+# cancel_order, _await_parent_terminal -- are NOT wrapped by this
+# change. They remain de-facto bounded by their existing ib_async
+# polling loops (parent orderId/permId assignment: 50 iterations x
+# 0.1s = 5s; child rejection cleanup: 30 x 0.1s = 3s; cancel broker
+# confirmation: 30 x 0.1s = 3s). Total submit_order wall-time is
+# bounded at ~15s worst case without explicit asyncio.wait_for. A
+# formal write-path wrapper is deferred to Phase 4+ when execution-
+# layer changes re-open; the Q34 scope per architect 2026-04-21 is
+# the read path that hung Session F.
+IBKR_CALL_TIMEOUT_SECONDS = 10.0
+
+
+def _resolve_timeout(conn: "IBKRConnector") -> float:
+    """Return the connector's configured per-call timeout. Defaults to
+    IBKR_CALL_TIMEOUT_SECONDS; tests pass a sub-second override via
+    the `timeout_seconds` constructor parameter (Q34 MiniMax R2
+    finding #5)."""
+    return conn._call_timeout_seconds
+
+
+async def _bounded_read(
+    conn: "IBKRConnector",
+    awaitable: Any,
+    *,
+    call_name: str,
+    empty: Any,
+) -> Any:
+    """Bound a broker-API READ call. On timeout: log + return `empty`
+    so the caller falls back to journal-authoritative per Q39-B. Does
+    NOT catch non-timeout exceptions -- those flow through the caller's
+    existing _classify_and_raise path unchanged."""
+    timeout = _resolve_timeout(conn)
+    try:
+        return await asyncio.wait_for(awaitable, timeout=timeout)
+    except asyncio.TimeoutError:
+        LOG.warning(
+            "broker_api_timeout call=%s timeout=%.1fs; returning empty "
+            "(Q34 journal-authoritative fallback)",
+            call_name,
+            timeout,
+        )
+        return empty
+
+
+async def _bounded_probe(
+    conn: "IBKRConnector",
+    awaitable: Any,
+    *,
+    call_name: str,
+) -> Any:
+    """Bound a broker-API PROBE or CONNECT call. On timeout: raise
+    DisconnectedError so the engine's reconnect/backoff cycle fires
+    rather than silently degrading. Non-timeout exceptions flow
+    through unchanged."""
+    timeout = _resolve_timeout(conn)
+    try:
+        return await asyncio.wait_for(awaitable, timeout=timeout)
+    except asyncio.TimeoutError as exc:
+        raise DisconnectedError(
+            f"broker_api_timeout call={call_name} timeout={timeout:.1f}s"
+        ) from exc
+
+
 class IBKRConnector:
     """Live ib_async-backed connector.
 
@@ -95,6 +178,7 @@ class IBKRConnector:
         port: int = 4002,
         client_id: int = 1,
         default_currency: str = "HKD",
+        timeout_seconds: float | None = None,
     ) -> None:
         """Construct with account scoping declared explicitly.
 
@@ -118,6 +202,16 @@ class IBKRConnector:
         self._client_id = client_id
         self._account_id = account_id
         self._default_currency = default_currency
+        # Q34 MiniMax R2 finding #5 (2026-04-21): explicit constructor
+        # parameter replaces the earlier _test_timeout_override getattr
+        # lookup so the override path is part of the class contract,
+        # not an undocumented runtime attribute that silently reverts
+        # to the 10s production default after a rename.
+        self._call_timeout_seconds: float = (
+            float(timeout_seconds)
+            if timeout_seconds is not None and timeout_seconds > 0
+            else IBKR_CALL_TIMEOUT_SECONDS
+        )
 
         self._ib: Any = None  # ib_async.IB instance, typed loosely to avoid import
         self._connected = False
@@ -140,11 +234,15 @@ class IBKRConnector:
             self._ib = ib_async.IB()
 
         try:
-            await self._ib.connectAsync(
-                host=self._host,
-                port=self._port,
-                clientId=self._client_id,
-                readonly=False,  # paper trading must allow order submission
+            await _bounded_probe(
+                self,
+                self._ib.connectAsync(
+                    host=self._host,
+                    port=self._port,
+                    clientId=self._client_id,
+                    readonly=False,  # paper trading must allow order submission
+                ),
+                call_name="connect",
             )
         except Exception as exc:  # ib_async raises a flat hierarchy
             self._classify_and_raise(exc, phase="connect")
@@ -154,7 +252,11 @@ class IBKRConnector:
         # if this call triggers 502, we learn about it now rather than
         # on the first order submission.
         try:
-            await self._ib.reqAccountSummaryAsync()
+            await _bounded_probe(
+                self,
+                self._ib.reqAccountSummaryAsync(),
+                call_name="post-connect-probe",
+            )
         except Exception as exc:
             self._classify_and_raise(exc, phase="post-connect probe")
 
@@ -193,7 +295,20 @@ class IBKRConnector:
         """
         self._require_connected()
         try:
-            rows = await self._ib.accountSummaryAsync()
+            # Q34 MiniMax R1 finding #5 (2026-04-21): use the PROBE
+            # wrapper here, not the read wrapper. A default
+            # AccountSummary(cash=0, net_liq=0) returned on timeout is
+            # semantically indistinguishable from a real zero-balance
+            # account; callers gating on NAV thresholds would reach
+            # wrong conclusions. Raising DisconnectedError funnels the
+            # call through the engine's reconnect/backoff cycle so a
+            # cash/NLV snapshot only surfaces when broker visibility
+            # is confirmed.
+            rows = await _bounded_probe(
+                self,
+                self._ib.accountSummaryAsync(),
+                call_name="account_summary",
+            )
         except Exception as exc:
             self._classify_and_raise(exc, phase="account_summary")
 
@@ -270,7 +385,12 @@ class IBKRConnector:
         """
         self._require_connected()
         try:
-            rows = await self._ib.reqPositionsAsync()
+            rows = await _bounded_read(
+                self,
+                self._ib.reqPositionsAsync(),
+                call_name="positions",
+                empty=[],
+            )
         except Exception as exc:
             self._classify_and_raise(exc, phase="positions")
 
@@ -308,7 +428,12 @@ class IBKRConnector:
         """
         self._require_connected()
         try:
-            rows = await self._ib.reqAllOpenOrdersAsync()
+            rows = await _bounded_read(
+                self,
+                self._ib.reqAllOpenOrdersAsync(),
+                call_name="open_orders",
+                empty=[],
+            )
         except Exception as exc:
             self._classify_and_raise(exc, phase="open_orders")
 
@@ -353,16 +478,42 @@ class IBKRConnector:
             return {}
         import ib_async  # type: ignore[import-not-found]
 
+        # Q34 MiniMax R3 finding #1 (2026-04-21): sequential per-ticker
+        # awaits with 10s timeouts amplify worst-case wall time linearly
+        # (50 tickers x 10s = 500s). Cap the TOTAL wall budget for the
+        # whole marks pass so a slow market-data farm cannot stall
+        # validation for minutes. Individual ticker timeouts still
+        # apply; this is an outer envelope around the whole loop.
+        aggregate_budget = min(
+            3.0 * _resolve_timeout(self), 60.0
+        )
+        deadline = time.monotonic() + aggregate_budget
         out: dict[str, Decimal] = {}
         for ticker in tickers:
+            if time.monotonic() >= deadline:
+                LOG.warning(
+                    "get_marks aggregate budget %.1fs exhausted; "
+                    "remaining tickers skipped (Q34 R3 finding #1)",
+                    aggregate_budget,
+                )
+                break
             contract = ib_async.Stock(ticker, "SMART", "USD")
             try:
-                [ticker_row] = await self._ib.reqTickersAsync(contract)
+                rows = await _bounded_read(
+                    self,
+                    self._ib.reqTickersAsync(contract),
+                    call_name=f"tickers[{ticker}]",
+                    empty=[],
+                )
             except Exception as exc:
                 # Market data errors are logged but non-fatal: validators
                 # fall back to avg_price when a mark is missing.
                 LOG.warning("mark fetch failed for %s: %s", ticker, exc)
                 continue
+            if not rows:
+                # Q34 timeout path: reqTickersAsync timed out; skip.
+                continue
+            ticker_row = rows[0]
             mark = getattr(ticker_row, "marketPrice", None)
             if mark is None or mark != mark:  # NaN check
                 continue
@@ -386,7 +537,12 @@ class IBKRConnector:
             filter_kwargs["acctCode"] = self._account_id
         exec_filter = ib_async.ExecutionFilter(**filter_kwargs)
         try:
-            fills = await self._ib.reqExecutionsAsync(exec_filter)
+            fills = await _bounded_read(
+                self,
+                self._ib.reqExecutionsAsync(exec_filter),
+                call_name="executions_since",
+                empty=[],
+            )
         except Exception as exc:
             self._classify_and_raise(exc, phase="executions_since")
 
@@ -432,7 +588,12 @@ class IBKRConnector:
         out: list[BrokerOrderStatusEvent] = []
 
         try:
-            completed = await self._ib.reqCompletedOrdersAsync(apiOnly=False)
+            completed = await _bounded_read(
+                self,
+                self._ib.reqCompletedOrdersAsync(apiOnly=False),
+                call_name="completed_orders",
+                empty=[],
+            )
         except Exception as exc:
             self._classify_and_raise(exc, phase="completed_orders")
 
