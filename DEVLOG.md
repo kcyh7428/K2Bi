@@ -3,6 +3,81 @@
 Session-by-session ship log. Append-only. New entries on top.
 
 
+## 2026-04-23 -- Phase 3.6 retro: 3-day shakedown complete + engine-fix branch ready to ship
+
+**Commits consolidated:** 5 engine-fix commits held since 2026-04-21 HKT afternoon on branch `engine-fix-pre-phase-3.7`, ready to ship with this retro (oldest → newest):
+- `596304e` feat(engine-recovery): Q39 + Q36 assume-filled hybrid primitive
+- `baf1f2a` test(engine-recovery): Q39 divergence + R3-R5 regression guards
+- `cd03d41` feat(engine): Q33 --once pre-exit barrier + barrier-timeout journal event
+- `1fca7c4` feat(connectors): Q34 bounded broker-API read-path timeouts
+- `4a126c1` fix(connectors): Q35 qualify contracts before mark-fetch
+
+Plus 2 carry-through commits that landed on the same branch mid-shakedown (CLAUDE.md reframe + its own DEVLOG entry, already adversarial-reviewed at commit time):
+- `6bfee80` docs(claude-md): reframe identity from Keith-specific to product/user-role
+- `d9bd466` docs: devlog for 6bfee80 -- CLAUDE.md Keith-to-user-role reframe
+
+Retro DEVLOG ships as the final commit on the branch before merge.
+
+**What shipped (Phase 3.6 outcome):** 3-day operational shakedown of the K2Bi engine under `run_forever` mode on MacBook, spanning 3 consecutive US trading sessions: Mon 2026-04-20 partial (engine kickoff 00:08 HKT Tue = 12:08 ET Mon), Tue 2026-04-21 full US session, Wed 2026-04-22 full US session. Engine closed out ~05:52 HKT Thu 2026-04-23 with engine pid 52336 still alive at 2 days 5 hours 45 minutes uptime.
+
+Single engine-submitted trade across the entire window: Day 1 BUY 2 SPY LMT 715 DAY filled @ $707.22 (`broker_order_id=17`, `perm_id=1382658194`) with child bracket STOP 697.13 GTC (`perm_id=1382658195`). Zero engine trades on Days 2 and 3. Position ends Phase 3.6: **LONG 2 SPY @ cost basis $707.72/share**, mark $711.21 EOD 4/22 (+$6.98 unrealized), protective STOP **`1888063981`** at $697.13 GTC alive broker-side (SELL 2 SPY STOP 697.13 GTC, PreSubmitted, broker-server-held regardless of client state).
+
+Cumulative Phase 3.6 paper P&L: **+$131.83 USD** (directionally positive; heavily luck-weighted from Day 1 Phase 3.5 cleanup short-cover episode -- the shakedown's own engine-strategy contribution is the small unrealized line, not the realized block). `eod_complete open_orders_seen=1` fired at EOD of each day, confirming Q37 adoption-by-observation held for every trading window.
+
+**Day-by-day summary:**
+
+| Day | Date | Engine trades | Operator trades | Q34 flaps | Q40 outages | Notable |
+|---|---|---|---|---|---|---|
+| 1 | 2026-04-20 ET partial | 1 fill (BUY 2 SPY @ $707.22) | 1 wrong-STOP cancel + 1 Portal-replacement | 6+ (35s-10.7min) | 0 | Q36 confirmed hypothesis A; Q37 first adoption observation; Q38 methodology lesson surfaced |
+| 2 | 2026-04-21 ET full | 0 | 0 | 4 (short) | 0 (outage started overnight post-close) | Day 2 trading window ran clean; Q34 instance (t) set up at Day-2/Day-3 handoff |
+| 3 | 2026-04-22 ET full | 0 | 0 | 4 (short, HK-evening cluster) | 1 (7h 41m 43s, overnight Day-2-close → Day-3-open) | Q40 discovered when Day 3 prep window opened with engine still retrying; 6h 24m clean trading window once Gateway restarted; Q37 3rd-day adoption = permanently closed |
+
+**Day-by-day table scope note:** Phase 3.6 Day 1 operator activity (the 2-trade cell) counts only the 06:41 HKT Tue mobile wrong-STOP cancel + the 07:12 HKT Tue Portal-replacement STOP -- both inside the Phase 3.6 Day 1 window. It does NOT include the Phase 3.5 cleanup episode from earlier on 2026-04-20 (Portal 3-sell quantity-error + flatten BUY 198 @ $707.19 at 11:16 PM HKT Mon = 11:16 ET Mon, which was PRE-Phase-3.6-kickoff at 12:08 ET Mon). Phase 3.5 cleanup is the source of the +$124.85 realized on 4/20 calendar day (not Phase 3.6 Day 1 engine-strategy edge); see the Session G "2026-04-20 -- Session G: Phase 3.5 first paper ticket SHIPPED clean" entry below for the full cleanup sequence.
+
+**Findings status (Q33-Q40 + (u)):**
+
+- **Q33** `--once` fill-callback race -- shipped in branch at `cd03d41`. Phase 3.6 ran `run_forever`, so no `--once`-specific recurrence observed; fix is preventative for future `--once` smoke runs.
+- **Q34** read-path timeout -- shipped at `1fca7c4`. **Validated twice** during Phase 3.6: (a) 24+ Q34 flap cycles across 3 days, all recovered cleanly under warm-reconnect with `init_completed_before_outage=True`; (b) Day 2/3 boundary **instance (t)** -- secondary `ib_async` client `reqAllOpenOrders` hung indefinitely post-massive-Gateway-restart on 2026-04-22 15:10 HKT; this is the exact failure surface the branch's 10s `asyncio.wait_for` wrapper was built to handle.
+- **Q34 write-path** (finding (r)) -- deferred follow-up per scope-lock (`Q34ScopeContractTests` via L-2026-04-20-002 pattern). Trigger: before Phase 3.8 first-domain-thesis OR if Phase 3.7 surfaces a write-path hang. Did NOT surface during Phase 3.6.
+- **Q35** mark-fetch `conId` warning -- shipped at `4a126c1`. Cosmetic, non-blocking. No Phase 3.6 regressions.
+- **Q36** `pending_no_broker_counterpart` false-negative -- shipped at `596304e` (conservative-fill-assumption + Q39 hybrid primitive). **Hypothesis A CONFIRMED** 2026-04-21 via 4/20 Activity Statement CSV: SPY BUY 2 @ $709.00 on BYX timestamped **14:43:55 UTC**; engine journal `order_submitted broker_perm_id=222703140` at **14:43:56 UTC**. Sub-second broker fill of engine's order 11. Qty/ticker/side/price/account all match. Engine's old `pending_no_broker_counterpart` reconciliation was definitively wrong; the branch fix is architecturally correct.
+- **Q37** external orphan STOP adoption -- **PERMANENTLY CLOSED.** 3-day `open_orders_seen=1` pattern + journal silence during every trading window + Activity Statements showing no 4/21 or 4/22 SPY transactions. Warm-reconnect path correctly defers to existing broker state when spec matches. Dropped from pre-Phase-3.7 engine-fix scope; no code change needed.
+- **Q38** architect reconciliation discipline -- methodology rule already shipped in `risk-controls.md` §Architect Discipline.
+- **Q39** broker-API historical visibility limit post-Gateway-restart -- shipped at `baf1f2a` (R3-R5 regression guards) + `596304e` (Journal-as-authoritative + orderRef-trail hybrid, Option 1 + 3). No Phase 3.6 regressions.
+- **Q40** prolonged Gateway-IBKR backend disconnect -- **NEW Day 3 discovery, NO engine code change needed.** 7h 41m 43s outage starting Wed 2026-04-22 07:38 HKT (= 19:38 ET Tue post-market-close Day 2 + 3h38m) and running through to Wed 15:10 HKT (= 03:10 ET Wed, pre-Day-3-open at 09:30 ET Wed). Outage spanned the entire overnight window between Day 2 close and Day 3 open. Engine retry loop was exemplary: one `disconnect_status` event per ~5 min, attempts 1 → 79, no journal flood, no state corruption. Gateway died; engine could not resurrect it. Missing piece is operator alerting. Maps to Bundle 5 m2.9 `invest-alert` Telegram bot with `disconnect_status outage_seconds > 300s` (configurable) as explicit trigger. Position remained safe throughout via broker-server-held STOP 1888063981 (IBKR-side, Gateway-independent).
+- **Finding (u)** MacBook environment instability -- **NEW Day 3-prep finding, drives Mac Mini migration.** Sustained Q34 flap pattern clustered at HK morning + evening transitions (WiFi/sleep/ISP behavior) plus the Q40 monster attributable to MacBook environment. Mac Mini = Ethernet + always-on + documented production target per milestones Bundle 5 m2.19. Promoted partial m2.19 (move-only; defers pm2/Telegram/IBC auto-restart to full Bundle 5 / Phase 3.9) from Bundle 5 to **interim step between Phase 3.6 retro and Phase 3.7**. Runbook at `K2Bi-Vault/wiki/planning/mac-mini-engine-migration.md`. Expected Q34 rate drop: ~5-10/24h on MacBook → <1/24h on Mac Mini; Q40-class outages become rare enough that Bundle 5 m2.9 alerting can wait without serious capital-at-risk exposure.
+
+**Engine-fix branch readiness:**
+
+- 5 engine-fix commits landed 2026-04-21 HKT afternoon. All reviewed per aggressive-bucket discipline (`execution/engine/**` + `execution/connectors/**`) via Codex primary + MiniMax fallback where required, with L-2026-04-19-001 + L-2026-04-20-001 + L-2026-04-20-002 carry-forward decisions applied.
+- Test suite: 967 (baseline at Session G HEAD `e411207`) → **1026 collected** at ship time (+59 tests). Over scope-doc target range of 997-1007 by ~19-29 tests due to L-2026-04-20-002 contract guards locking architect decisions against same-vector reviewer pressure (`Q34ScopeContractTests`, plus regression guards on Q33 `once_exit_barrier_timeout` default, Q34 10s read-path default, Q36 assume-fill fallback, Q39 hybrid recovery).
+- **Real-world validation during Phase 3.6:** 3 of 5 fixes carry production-like validation, not just test-suite coverage. Q36 hypothesis A confirmed via Activity Statement (Day 1 cross-reference). Q34 read-path wrapper would have caught instance (t) on Day 2/3 boundary secondary-client hang. Q39 broker-visibility gap confirmed affecting Q36 reconciliation via secondary diagnostic on Day 1.
+- Zero outstanding reviewer concerns. Architect-locked decisions pinned via contract tests. Branch ready to merge.
+
+**Feature status change:** Phase 3.6 flipped **pending → SHIPPED.** Pre-Phase-3.7 sequence: Phase 3.6 retro (this entry) → engine-fix branch merge to main → `/invest-sync` to Mac Mini → Mac Mini migration Phase 1 (stop MacBook side cleanly; this session) → operator-driven migration Phases 2-7 over SSH + Mac Mini GUI (separate session) → 24h stability monitoring on Mac Mini → Phase 3.7 `invest-screen` MVP work begins on the stable Mac Mini engine.
+
+**Follow-ups:**
+- **Mac Mini migration Phase 1** (MacBook side, from this session after ship + sync): `touch ~/Projects/K2Bi-Vault/System/.killed`, wait for engine-acknowledge in journal, `tmux kill-session -t k2bi-engine`, verify engine pid gone, stop caffeinate, shut down MacBook IB Gateway via GUI, verify nothing on :4002, do NOT relaunch Gateway on MacBook for remainder of session. Phases 2-7 are operator-driven and out of scope for this Claude session.
+- **Q34 write-path** (finding (r)) -- deferred follow-up branch. Trigger: before Phase 3.8 first-domain-thesis position that may hold multiple days.
+- **Bundle 5 m2.9 `invest-alert` Telegram** -- explicitly include `disconnect_status outage_seconds > 300s` as required alert trigger (Q40 addressed architecturally when m2.9 ships).
+- **Phase 3.7 `invest-screen` MVP** -- gated on the full sequence in "Feature status change" above: (1) engine-fix branch merge, (2) `/invest-sync` to Mac Mini, (3) Mac Mini migration Phase 1 (MacBook side stop; this session), (4) operator-driven migration Phases 2-7 over SSH + Mac Mini GUI (separate session), (5) 24h stability monitoring on Mac Mini. Estimated timeline: 1-2 sessions + 24h burn-in before Phase 3.7 code work begins on the stable Mac Mini engine. Do NOT re-deploy the engine to the MacBook host once the migration starts.
+- **`engine-behavior-patterns.md` reference doc** (Phase 4+) -- capture Q37 adoption-by-observation pattern + `eod_complete open_orders_seen=1` as reliable adoption check + Q39 visibility caveat for recovery logic.
+
+**Key decisions (session-level):**
+
+- **Engine-fix branch ships WITHOUT Q37 fix.** 3-day adoption-by-observation validation permanently closes Q37; no code change needed. Initial scope doc listed Q37 as conditional-on-observation; observation cleared it clean.
+- **Q40 gets zero engine-code fix in this branch.** Engine did the right thing during the 7h 41m outage: retry cadence correct, no flood, no corruption. Missing piece is operator alerting, which lives in Bundle 5 m2.9 scope. Adding Q40 to engine-fix branch would have been engineering against the wrong problem.
+- **Mac Mini migration promoted from Bundle 5 to interim step.** Finding (u) characterized MacBook as sustained driver of Q34 flap + Q40 outage frequency. Moving partial m2.19 forward (move-only) is the operational fix; defers full m2.19 pm2 + Telegram + IBC work to Bundle 5 / Phase 3.9 without loss.
+- **Shakedown P&L attribution: luck, not edge.** Day 1's +$124.85 realized came from Phase 3.5 Run 2 cleanup accidental short-cover landing below average sell price (documented in Session G DEVLOG). Engine-strategy contribution is the Days 1-3 unrealized on the held 2 SPY, ending +$6.98 EOD 4/22. The strategy has not demonstrated edge; 3-day paper P&L is not a signal. Attribution matters for future self.
+- **Two carry-through commits on the branch (6bfee80 + d9bd466) are intentional, not accidental.** CLAUDE.md reframe + its DEVLOG entry landed on `engine-fix-pre-phase-3.7` on 2026-04-21 HKT afternoon between the engine-fix commits and the shakedown window. Both were adversarial-reviewed at commit time (MiniMax single-pass per orchestrator-prose bucket, all findings triaged). They ship together with the engine-fix commits; no loss of audit trail.
+
+**Observer notes:**
+- Activity Statement CSV download confirmed **read-only, non-disruptive** broker-audit path (Day 1 verification). Does NOT kick Gateway. Pinned for future verification workflows in `risk-controls.md` §Architect Discipline.
+- `eod_complete open_orders_seen=1` shape validated as reliable Q37-adoption heuristic (3 consecutive days: Day 1 EOD = Day 2 EOD = Day 3 EOD, all 1-open-STOP-only). Future engine-behavior-patterns doc should capture.
+- IB Gateway post-restart historical visibility limit is a broker-session-cache vs broker-server-of-record distinction; Q39 scope. Production answer for engine recovery: journal-as-authoritative + orderRef-trail + Flex Query Service at Phase 5 for real money (next-day Activity Statement reconciliation).
+- Engine pid 52336 uptime at Phase 3.6 close: 2d 5h 45m, resilient across every environmental perturbation observed. Engine-side is production-grade; everything that broke was environment (MacBook) or broker-side (Gateway).
+
+
 ## 2026-04-21 -- CLAUDE.md reframe: Keith-specific to product/user-role
 
 **Commit:** `6bfee80` docs(claude-md): reframe identity from Keith-specific to product/user-role
