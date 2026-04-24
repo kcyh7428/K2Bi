@@ -34,7 +34,7 @@ import asyncio
 import logging
 import time
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .types import (
@@ -548,10 +548,43 @@ class IBKRConnector:
                 # Q34 timeout path: reqTickersAsync timed out; skip.
                 continue
             ticker_row = rows[0]
-            mark = getattr(ticker_row, "marketPrice", None)
+            raw_mark = getattr(ticker_row, "marketPrice", None)
+            if raw_mark is None:
+                continue
+            # Q43 (2026-04-24): ib_async 2.1.0 exposes Ticker.marketPrice
+            # as a method, not an attribute. Other price fields (last,
+            # bid, ask, close) are float attributes; marketPrice and
+            # midpoint are computed-method accessors. Pre-Q35 the
+            # mark-fetch failed earlier (no conId), masking this latent
+            # bug; post-Q35 the Ticker lands successfully and
+            # Decimal(str(<bound method>)) raised ConversionSyntax on
+            # first tick. Call if callable; pass through the value for
+            # back-compat with hypothetical future library shapes.
+            if callable(raw_mark):
+                try:
+                    mark = raw_mark()
+                except Exception as exc:
+                    LOG.warning(
+                        "marketPrice() call failed for %s: %s", ticker, exc
+                    )
+                    continue
+            else:
+                mark = raw_mark
             if mark is None or mark != mark:  # NaN check
                 continue
-            out[ticker] = Decimal(str(mark))
+            try:
+                out[ticker] = Decimal(str(mark))
+            except (InvalidOperation, TypeError, ValueError) as exc:
+                # Defense-in-depth: if a future ib_async returns a
+                # non-numeric mark that slips past None/NaN guards, log
+                # + skip rather than crash the tick loop.
+                LOG.warning(
+                    "Decimal conversion failed for %s mark=%r: %s",
+                    ticker,
+                    mark,
+                    exc,
+                )
+                continue
         return out
 
     async def get_executions_since(
