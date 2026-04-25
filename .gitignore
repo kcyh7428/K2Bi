@@ -25,6 +25,9 @@ ibkr_credentials*
 *.swp
 *~
 
+# Local scratch / transient plans (never commit -- canonical plans go in K2Bi-Vault/wiki/planning/)
+.tmp/
+
 # Pending-sync mailbox is a directory of session-defer entries -- contents not committed
 .pending-sync/*
 !.pending-sync/.gitkeep
