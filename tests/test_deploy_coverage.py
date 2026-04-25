@@ -815,7 +815,7 @@ def test_detect_categories_sentinel_not_ancestor_of_head_returns_all(
 def test_detect_categories_honors_head_override(tmp_path: Path) -> None:
     """Codex R7 final-gate F1: `detect-categories --head <sha>` must use
     the explicit SHA as the diff target rather than the current `HEAD`.
-    deploy-to-mini.sh relies on this so detection + record-sync see the
+    deploy-to-vps.sh relies on this so detection + record-sync see the
     same snapshot even if a new commit lands mid-sync."""
     _init_git_repo(tmp_path)
     _touch(tmp_path / "CLAUDE.md")

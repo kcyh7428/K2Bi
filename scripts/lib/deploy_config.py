@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Read scripts/deploy-config.yml and answer queries for deploy-to-mini.sh and
+"""Read scripts/deploy-config.yml and answer queries for deploy-to-vps.sh and
 /invest-ship's step 12 preflight.
 
 This is the single source of truth for:
-  - which paths deploy to the Mac Mini and under which /sync mailbox category
+  - which paths deploy to the Hostinger VPS and under which /sync mailbox category
   - which paths are intentionally kept local (design docs, reviewer archives,
     per-machine state)
   - whether the working tree has a top-level dir that drifted out of coverage
@@ -36,14 +36,14 @@ Subcommands are text-oriented so bash can consume them via command substitution:
       sentinel is absent (first-time deploy) or points to an unreachable SHA
       (rebased/amended away), falls back to printing all known categories so
       nothing is silently skipped on the next rsync. Replaces the cycle-2
-      deploy-to-mini.sh auto-detect which keyed off `git diff HEAD~1 HEAD`
+      deploy-to-vps.sh auto-detect which keyed off `git diff HEAD~1 HEAD`
       and missed committed code changes when a devlog-only commit landed on
       top of them (the cycle-5 carry-over bug).
 
   deploy_config.py record-sync
       Write the current `git rev-parse HEAD` SHA to
       .sync-state/last-synced-commit atomically (tempfile + os.replace).
-      Called by deploy-to-mini.sh after a successful (non-dry-run) sync so
+      Called by deploy-to-vps.sh after a successful (non-dry-run) sync so
       the next detect-categories call can scope its diff to commits that
       landed after this point.
 
@@ -506,7 +506,7 @@ def cmd_detect_categories(
     were never part of the detection scope.
 
     Exit 0 always. An empty stdout means "no pending changes" -- the caller
-    (deploy-to-mini.sh auto mode) treats that as a "no-op, exit 0" signal.
+    (deploy-to-vps.sh auto mode) treats that as a "no-op, exit 0" signal.
     """
     repo = _repo_root()
     # Verify we are in a git repo at all. Missing git, or a non-git override
@@ -542,7 +542,7 @@ def cmd_detect_categories(
         return cmd_list_categories(config)
 
     # Committed diff: sentinel..<pinned head or current HEAD>. The upper
-    # bound is the only place `head_sha` applies -- it lets deploy-to-mini.sh
+    # bound is the only place `head_sha` applies -- it lets deploy-to-vps.sh
     # say "treat the state at run-start as the ceiling" so a commit that
     # landed mid-sync does not sneak into this run's category set.
     upper_bound = head_sha or "HEAD"
@@ -568,10 +568,10 @@ def cmd_detect_categories(
 
 def cmd_record_sync(config: dict, *, sha: str | None = None) -> int:
     """Atomically record a HEAD SHA as the last-successfully-synced commit.
-    Called by deploy-to-mini.sh after all rsync targets for a run have
+    Called by deploy-to-vps.sh after all rsync targets for a run have
     landed (not on --dry-run).
 
-    `sha` is the Codex R7 final-gate F1 fix: deploy-to-mini.sh captures
+    `sha` is the Codex R7 final-gate F1 fix: deploy-to-vps.sh captures
     a baseline SHA at run start and passes it through both detect-categories
     and record-sync so the sentinel never advances past commits that were
     never part of the matching rsync plan. When `sha` is None (legacy
@@ -715,7 +715,7 @@ def main() -> int:
         default=None,
         help=(
             "Pin the diff target to this SHA instead of the current "
-            "`HEAD`. Used by deploy-to-mini.sh so detection + record-sync "
+            "`HEAD`. Used by deploy-to-vps.sh so detection + record-sync "
             "agree on the same snapshot even if a new commit lands "
             "mid-sync."
         ),

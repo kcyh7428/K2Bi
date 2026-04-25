@@ -3,7 +3,9 @@
 #
 # Guarantees the reviewer can never hang the ship:
 #   * deadline: hard SIGTERM at --deadline seconds (default 360 = 6 min)
-#   * fallback: if Codex fails/times out, auto-runs MiniMax on same scope
+#   * fallback: if Codex fails/times out, auto-runs scripts/minimax-review.sh
+#     (Kimi K2.6 by default since c04f603; legacy MiniMax M2.7 via
+#     K2B_LLM_PROVIDER=minimax) on the same scope
 #   * visibility: watchdog injects HEARTBEAT / HEARTBEAT_STALE / WEDGE_SUSPECTED
 #     lines into the unified log every few seconds, so `scripts/review-poll.sh`
 #     always shows fresh activity even during pure-inference phases.
@@ -19,6 +21,8 @@
 #
 # Common flags:
 #   --primary codex|minimax   default: codex
+#     (the 'minimax' flag value selects scripts/minimax-review.sh, which
+#      routes to Kimi K2.6 by default per the K2B_LLM_PROVIDER swap)
 #   --deadline N              default: 360
 #   --wait                    block with final JSON instead of background
 #

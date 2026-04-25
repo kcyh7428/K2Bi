@@ -172,7 +172,7 @@ If the helper succeeded, it has ALREADY rewritten the file atomically with `stat
 
 Run review against the strategy FILE, not the working-tree diff. Two review passes ship per `/ship --approve-strategy`: this one (spec review) plus the normal Checkpoint 2 pre-commit review in step 3 that covers the commit diff. They have different scopes.
 
-**Always invoke via `scripts/review.sh`** -- it backgrounds the call, writes heartbeat lines every ~5s, enforces a 6-minute wall-clock deadline, and auto-falls-back from Codex to MiniMax if Codex times out or wedges. Never call `codex-companion.mjs` or `scripts/minimax-review.sh` directly from the ship flow; the `.claude/hooks/review-guard.sh` PreToolUse hook will block those. See "Review wrapper contract" below for the full interface.
+**Always invoke via `scripts/review.sh`** -- it backgrounds the call, writes heartbeat lines every ~5s, enforces a 6-minute wall-clock deadline, and auto-falls-back from Codex to the Kimi-backed reviewer (via `scripts/minimax-review.sh`) if Codex times out or wedges. Never call `codex-companion.mjs` or `scripts/minimax-review.sh` directly from the ship flow; the `.claude/hooks/review-guard.sh` PreToolUse hook will block those. See "Review wrapper contract" below for the full interface.
 
 ```bash
 ./scripts/review.sh plan --plan "<path>" --primary codex \
@@ -287,7 +287,7 @@ python3 -m scripts.lib.invest_ship_strategy retire-strategy "<path>" --reason "<
 Applies a limits-proposal + its embedded YAML patch to `execution/validators/config.yaml` in a single gated commit. Spec §5.3 + §4.1 Check C.
 
 - Step A: helper validates the limits-proposal (frontmatter + `## Change` block + `## YAML Patch` before/after blocks), asserts `status: proposed`, and finds exactly one occurrence of the `before` block in config.yaml.
-- Step B: plan review focused on safety-impact of the widened/tightened limit. Invoke via `./scripts/review.sh plan --plan "<proposal>" --primary codex --focus "safety impact of widened/tightened limit"`; the wrapper handles Codex -> MiniMax fallback automatically.
+- Step B: plan review focused on safety-impact of the widened/tightened limit. Invoke via `./scripts/review.sh plan --plan "<proposal>" --primary codex --focus "safety impact of widened/tightened limit"`; the wrapper handles Codex -> Kimi-backed reviewer fallback automatically.
 - Step C: confirm with Keith.
 - Step D: helper applies the config.yaml edit AND the proposal frontmatter flip atomically (tempfile + os.replace for both files; config.yaml edit happens FIRST so a failure leaves the proposal in `status: proposed` rather than claiming an approved state that didn't land).
 - Step E: stage BOTH files. Rejoin normal ship flow with the helper's `feat(limits): approve <slug>` subject and trailers (`Limits-Transition: proposed -> approved`, `Approved-Limits: <slug>`, `Config-Change: <rule>:<change_type>`, `Co-Shipped-By: invest-ship`). Cycle-4 pre-commit Check C enforces that both files appear in the same staged commit diff with the proposal transitioning proposed -> approved.
@@ -314,7 +314,7 @@ Categorize touched files into:
 | skills    | `.claude/skills/`, `.claude/settings.json`, `CLAUDE.md`, `README.md`, `DEVLOG.md` | yes |
 | execution | `execution/`, `requirements.txt` | yes (Python deps + engine restart on Mini) |
 | scripts   | `scripts/` including `scripts/hooks/` and `scripts/lib/` | yes |
-| pm2       | `pm2/` (Phase 6+ populates this) | yes (pm2 restart on Mini) |
+| pm2       | `pm2/` (Phase 6+ populates this) | yes (systemd restart on VPS) |
 | vault     | `K2Bi-Vault/` | no (Syncthing) |
 | plans     | `plans/`, `.claude/plans/` | no |
 | proposals | `proposals/` | no |
@@ -340,12 +340,12 @@ For multi-ship features (e.g. `feature_mission-control-v3`), read the feature no
 
 ### Review wrapper contract (mandatory entrypoint)
 
-**All review invocations from `/ship` MUST go through `scripts/review.sh`.** The `.claude/hooks/review-guard.sh` PreToolUse hook blocks direct Bash-tool calls to `codex-companion.mjs review` and `scripts/minimax-review.sh`. Direct calls are not a policy preference -- they are a correctness hazard. The 2026-04-19 timing audit (see devlog) measured 115-218s typical Codex reviews and 60-180s MiniMax reviews, with Codex showing 13-61s of pure-inference silence at the end of every call. Without the wrapper, those silences look identical to a wedge and cause Claude to keep polling a dead session or, worse, to re-invoke the review and double the wait.
+**All review invocations from `/ship` MUST go through `scripts/review.sh`.** The `.claude/hooks/review-guard.sh` PreToolUse hook blocks direct Bash-tool calls to `codex-companion.mjs review` and `scripts/minimax-review.sh`. Direct calls are not a policy preference -- they are a correctness hazard. The 2026-04-19 timing audit (see devlog) measured 115-218s typical Codex reviews and 60-180s for the Kimi-backed reviewer, with Codex showing 13-61s of pure-inference silence at the end of every call. Without the wrapper, those silences look identical to a wedge and cause Claude to keep polling a dead session or, worse, to re-invoke the review and double the wait.
 
 `scripts/review.sh` provides three guarantees that eliminate the disappear-and-wait failure mode:
 
 1. **Deadline.** Hard SIGTERM at `--deadline` seconds per reviewer (default 360). Soft warning injected into the log at 2/3 of that. After SIGTERM, 10s grace then SIGKILL if the child hasn't exited.
-2. **Fallback.** Primary is Codex by default. If the primary exits non-zero or hits the deadline, the wrapper automatically re-runs the same scope on the secondary reviewer (MiniMax M2.7). Only if BOTH fail does the wrapper exit with code 2.
+2. **Fallback.** Primary is Codex by default. If the primary exits non-zero or hits the deadline, the wrapper automatically re-runs the same scope on the secondary reviewer (Kimi K2.6 by default via `scripts/minimax-review.sh`; legacy MiniMax M2.7 reachable via `K2B_LLM_PROVIDER=minimax`). Only if BOTH fail does the wrapper exit with code 2.
 3. **Visibility.** A watchdog thread writes `HEARTBEAT elapsed=Xs stale=Ys` lines into the unified log every 5s regardless of what the reviewer is doing. After 30s of log-mtime staleness it escalates to `HEARTBEAT_STALE` (phase = final_inference). After 120s of staleness it escalates to `WEDGE_SUSPECTED`. This means `scripts/review-poll.sh` never returns "no change since last poll" -- the poll output always moves.
 
 **Invocation (Checkpoint 2 pre-commit review):**
@@ -361,21 +361,21 @@ FILES="$(git diff --name-only HEAD | paste -sd, -)"
 
 1. Every 30s, run `./scripts/review-poll.sh <job_id>` and read the JSON.
 2. Surface `status`, `phase`, `elapsed_s`, `reviewer_current`, and the last line of `tail` to Keith. Example: "Codex running_commands at 47s, last: `sed -n '1,260p' scripts/...`". During the end_gap this becomes "Codex final_inference at 132s, no log activity for 28s -- normal for verdict generation." During a true wedge it becomes "Codex wedge_suspected at 254s, no activity for 141s -- fallback will trigger at 360s."
-3. Stop polling when `should_poll_again=false`. At that point read the full log tail and present findings to Keith. The log captures Codex's verbatim `# Codex Review` output or MiniMax's `# MiniMax ... review -- APPROVE|NEEDS-ATTENTION` block.
+3. Stop polling when `should_poll_again=false`. At that point read the full log tail and present findings to Keith. The log captures Codex's verbatim `# Codex Review` output or the wrapper's `# MiniMax ... review -- APPROVE|NEEDS-ATTENTION` block (the wrapper still emits `# MiniMax` headers regardless of which provider produced the review).
 
 **When the wrapper exits 2 (both reviewers failed):**
 
 - Report which reviewer attempts were made and why each failed (read `reviewer_attempts` from poll output).
 - Offer `/ship --skip-codex <reason>` with one of the audit reason strings:
   - `codex-timeout-minimax-timeout` -- both hit the deadline; the diff may be too large, consider narrowing scope.
-  - `codex-wedged-minimax-unavailable` -- Codex reconnect-stormed AND MiniMax key missing/network blocked.
+  - `codex-wedged-minimax-unavailable` -- Codex reconnect-stormed AND the Kimi-backed reviewer unavailable (network or API key issue).
   - `codex-unavailable` (legacy) -- pre-wrapper escape hatch; strictly worse audit trail, avoid.
 - Reference the archive paths in the commit footer: `.code-reviews/<job_id>.log` and, if MiniMax ran, `.minimax-reviews/<archive-ts>_<scope>.json`.
 
 **Presenting findings:**
 
 - Verbatim. Do not paraphrase, rank, or pre-filter.
-- Severity translation when MiniMax ran: `critical` ≈ P0, `high` ≈ P1, `medium` ≈ P2, `low` ≈ P3. Apply the same architect stop-rule ("ship when P1=0 + P2 isolated") against MiniMax severities using this mapping.
+- Severity translation when the Kimi-backed reviewer ran: `critical` ≈ P0, `high` ≈ P1, `medium` ≈ P2, `low` ≈ P3. Apply the same architect stop-rule ("ship when P1=0 + P2 isolated") against the wrapper's severities using this mapping.
 - Re-run rounds label as `R<N>` when same reviewer, `R<N>-minimax` when the fallback tripped mid-loop (so the audit trail is honest about the vendor switch).
 - Keith decides fix / defer / accept. If fixed, re-invoke `scripts/review.sh` on the new diff.
 
@@ -384,10 +384,10 @@ FILES="$(git diff --name-only HEAD | paste -sd, -)"
 The old `/ship` flow handled Codex's WebSocket reconnect storm (5 silent retries ~= 10+ min before any output) by telling the assistant to launch `codex-companion.mjs` via `Bash(run_in_background=true)` and tail the state-dir log every 90s. That worked, but three assistant-side behaviors broke it:
 
 - The assistant sometimes called Codex synchronously (foreground), and the whole session hung.
-- When MiniMax was the reviewer, there was no tailable log at all -- the synchronous HTTP POST in `minimax-review.sh` had zero in-flight output, so polling returned nothing useful.
+- When the Kimi-backed reviewer (formerly MiniMax M2.7 pre-2026-04-25) ran, there was no tailable log at all -- the synchronous HTTP POST in `minimax-review.sh` had zero in-flight output, so polling returned nothing useful.
 - When Codex did finish running commands and entered pure inference (13-61s on typical reviews), the log stopped growing and the assistant mistook the silence for a wedge, terminated the job, and re-ran -- compounding the hang.
 
-`scripts/review.sh` fixes all three by making background execution non-optional (enforced by the hook), unifying the log format across reviewers (the watchdog writes its own HEARTBEAT lines so a poll can distinguish "in final inference" from "wedged"), and automating Codex -> MiniMax fallback so the assistant never has to diagnose vendor failure mid-ship.
+`scripts/review.sh` fixes all three by making background execution non-optional (enforced by the hook), unifying the log format across reviewers (the watchdog writes its own HEARTBEAT lines so a poll can distinguish "in final inference" from "wedged"), and automating Codex -> Kimi-backed reviewer fallback so the assistant never has to diagnose vendor failure mid-ship.
 
 ### Codex Adversarial Review -- the two checkpoints
 
@@ -566,13 +566,16 @@ If the just-shipped feature was removed from In Progress (leaving In Progress em
 **Pre-check: does this repo even have a deploy target?** Before prompting sync-now / defer, verify the current repo has a deploy script:
 
 ```bash
-if [ ! -x scripts/deploy-to-mini.sh ]; then
-  echo "deploy-handoff: skipped (no scripts/deploy-to-mini.sh in $(pwd) -- repo has no Mac Mini deploy target yet)"
+if [ ! -x scripts/deploy-to-vps.sh ]; then
+  echo "deploy-handoff: skipped (no scripts/deploy-to-vps.sh in $(pwd) -- repo has no VPS deploy target yet)"
   # Skip the rest of step 12 entirely. Do not write to .pending-sync/.
 fi
 ```
 
-For K2B, the script exists -- flow continues as normal. For K2Bi (Phase 1 through Phase 3), no Mini provisioning exists yet, so the sync question is meaningless and the mailbox entry would be a dead letter. Once K2Bi gets its own `deploy-to-mini.sh` in Phase 4, this check starts passing and the rest of step 12 engages automatically.
+For K2B, the script exists -- flow continues as normal. For K2Bi (Phase 1 through Phase 3), no VPS provisioning exists yet, so the sync question is meaningless and the mailbox entry would be a dead letter. Once K2Bi gets its own `deploy-to-vps.sh` in Phase 4, this check starts passing and the rest of step 12 engages automatically.
+
+# Phase 3.9 Stage 2 note: the deploy script was renamed from `deploy-to-mini.sh`
+# to `deploy-to-vps.sh` and retargeted from Mac Mini to Hostinger VPS.
 
 **Deploy-coverage preflight (required when deploy script exists):** before any sync-now / defer prompt, run the deploy-config.yml drift check. A top-level path that is not covered by `targets:` AND not in `excludes:` is a silent-deploy bug waiting to happen (the path gets added locally, nobody updates the deploy script, the Mini goes out of sync undetected). The preflight blocks /ship entirely until Keith resolves the drift -- he cannot defer what cannot be routed.
 
@@ -592,14 +595,14 @@ The preflight runs even on `--no-feature` + `--defer` paths, because mailbox ent
 
 If the deploy script exists AND the preflight passes, continue:
 
-If any files in categories `skills`, `execution`, `scripts`, or `pm2` (the live `scripts/deploy-config.yml` category set; run `python3 scripts/lib/deploy_config.py list-categories` to confirm) were in the commits, the Mac Mini is now out of date with the pushed code. (`scripts/hooks/**` rolls up into `scripts` -- do not write a separate `hooks` category into mailbox entries, `/sync` has no deploy target for it and would silently drop the change.) A soft reminder is not enough because it can be missed and leaves no recovery signal. Ask Keith an explicit question:
+If any files in categories `skills`, `execution`, `scripts`, or `pm2` (the live `scripts/deploy-config.yml` category set; run `python3 scripts/lib/deploy_config.py list-categories` to confirm) were in the commits, the Hostinger VPS is now out of date with the pushed code. (`scripts/hooks/**` rolls up into `scripts` -- do not write a separate `hooks` category into mailbox entries, `/sync` has no deploy target for it and would silently drop the change.) A soft reminder is not enough because it can be missed and leaves no recovery signal. Ask Keith an explicit question:
 
 > Project files changed (list the categories + files). Run `/sync` now, or defer to a later session?
 > - **now** -- invoke `/sync` in-line, confirm it completed, done
 > - **defer** -- drop a new entry in the `.pending-sync/` mailbox so the next session (or the next `/sync`) catches up
 
 **If Keith picks `now`:**
-1. Invoke the `invest-sync` skill via the Skill tool (or run `"$(git rev-parse --show-toplevel)"/scripts/deploy-to-mini.sh auto` if skill invocation is unavailable in the current harness -- the path resolves to the current repo's deploy script, not hardcoded to K2B, so a sibling repo with its own `scripts/deploy-to-mini.sh` deploys its own tree).
+1. Invoke the `invest-sync` skill via the Skill tool (or run `"$(git rev-parse --show-toplevel)"/scripts/deploy-to-vps.sh auto` if skill invocation is unavailable in the current harness -- the path resolves to the current repo's deploy script, not hardcoded to K2B, so a sibling repo with its own `scripts/deploy-to-vps.sh` deploys its own tree).
 2. Report what was synced.
 3. **Do NOT touch the `.pending-sync/` mailbox.** `/sync` is the sole owner of the mailbox lifecycle. It consumes and deletes its own entries on success. Any cleanup `/ship` did after-the-fact would race with a concurrent `/ship --defer` in another session and could silently destroy a newer deferred entry. Leave the mailbox alone.
 
@@ -727,9 +730,9 @@ up: "[[index]]"
 
 ## What /ship Does NOT Do
 
-- Auto-sync to Mac Mini (Keith must run `/sync` explicitly)
+- Auto-sync to Hostinger VPS (Keith must run `/sync` explicitly)
 - Edit vault files other than the feature note, `wiki/concepts/index.md`, `wiki/log.md`, `DEVLOG.md`, the skill-usage-log, and `raw/sessions/`
-- Overwrite `store/` (production SQLite on Mac Mini)
+- Overwrite `store/` (production SQLite on Hostinger VPS)
 - Touch `.env` files
 - Force-push, amend existing commits, rebase, or use any destructive git operation
 - Run deployment scripts

@@ -1,15 +1,15 @@
 ---
 name: invest-sync
-description: Sync K2Bi project files to the Mac Mini server -- detects what changed, syncs every category declared in scripts/deploy-config.yml (skills, execution, scripts, pm2 today; extensible), rebuilds on the Mini when the category needs it. Use when Keith says /sync, "sync to mini", "deploy to mini", "push to mini", or after K2Bi modifies project files tracked by the deploy config.
+description: Sync K2Bi project files to the Hostinger VPS -- detects what changed, syncs every category declared in scripts/deploy-config.yml (skills, execution, scripts, pm2 today; extensible), rebuilds on the VPS when the category needs it. Use when Keith says /sync, "sync to vps", "deploy to vps", "push to vps", or after K2Bi modifies project files tracked by the deploy config.
 ---
 
-# K2Bi Sync to Mac Mini
+# K2Bi Sync to Hostinger VPS
 
-Push K2Bi project file changes from MacBook to the always-on Mac Mini server.
+Push K2Bi project file changes from MacBook to the always-on Hostinger VPS server.
 
 ## When to Trigger
 
-**Explicitly:** Keith says `/sync`, "sync to mini", "deploy", "push to mini".
+**Explicitly:** Keith says `/sync`, "sync to vps", "deploy", "push to vps".
 
 **Proactively prompt Keith** at the end of any session where K2Bi modified files inside a tree declared in `scripts/deploy-config.yml`. Don't hardcode the list here -- ask the config helper at prompt time:
 
@@ -26,23 +26,23 @@ As of cycle 2 + cycle 4's infra cleanup, that returns (alphabetical within categ
 
 The live authoritative output always wins over this note.
 
-Say: "Changes were made to [list]. These are on your MacBook only. Run /sync to push to Mac Mini?"
+Say: "Changes were made to [list]. These are on your MacBook only. Run /sync to push to Hostinger VPS?"
 
 Do NOT auto-sync without Keith's confirmation. Always ask first.
 
 ## Commands
 
 - `/sync` -- auto-detect what changed and sync it
-- `/sync <category>` -- sync a single category, where `<category>` is any value printed by `python3 scripts/lib/deploy_config.py list-categories`. The helper + `deploy-to-mini.sh` are the single source of truth; do not hardcode category names here.
+- `/sync <category>` -- sync a single category, where `<category>` is any value printed by `python3 scripts/lib/deploy_config.py list-categories`. The helper + `deploy-to-vps.sh` are the single source of truth; do not hardcode category names here.
 - `/sync all` -- force full sync of every category
-- `/sync status` -- `deploy-to-mini.sh --dry-run`; shows what would sync without changing anything
+- `/sync status` -- `deploy-to-vps.sh --dry-run`; shows what would sync without changing anything
 
 ## Paths
 
-- Deploy script: `~/Projects/K2Bi/scripts/deploy-to-mini.sh`
+- Deploy script: `~/Projects/K2Bi/scripts/deploy-to-vps.sh`
 - Config source of truth: `~/Projects/K2Bi/scripts/deploy-config.yml`
-- Mac Mini SSH alias: `macmini`
-- Remote K2Bi project: `~/Projects/K2Bi/` on Mac Mini
+- Hostinger VPS SSH alias: `hostinger`
+- Remote K2Bi project: `/home/k2bi/Projects/K2Bi/` on Hostinger VPS
 
 ## Workflow
 
@@ -93,16 +93,16 @@ This is the durable recovery path: a fresh Claude Code session can discover that
 
 **Primary method: use conversation context.** K2Bi knows which files it modified in the current session. List exactly those files -- don't scan the whole repo.
 
-**If context is unclear** (e.g. Keith runs `/sync` in a fresh session), use `deploy-to-mini.sh --dry-run` to compare MacBook vs Mac Mini via the same rsync invocations the real sync uses. That avoids duplicating hardcoded paths in this skill.
+**If context is unclear** (e.g. Keith runs `/sync` in a fresh session), use `deploy-to-vps.sh --dry-run` to compare MacBook vs VPS via the same rsync invocations the real sync uses. That avoids duplicating hardcoded paths in this skill.
 
 ```bash
-~/Projects/K2Bi/scripts/deploy-to-mini.sh --dry-run
+~/Projects/K2Bi/scripts/deploy-to-vps.sh --dry-run
 ```
 
 This compares actual file contents between machines -- not git state. Only files that genuinely differ will show up. If a specific category is suspected:
 
 ```bash
-~/Projects/K2Bi/scripts/deploy-to-mini.sh --dry-run <category>
+~/Projects/K2Bi/scripts/deploy-to-vps.sh --dry-run <category>
 ```
 
 **Do NOT use `git diff --name-only HEAD`** -- that shows all uncommitted changes since last commit, including files already synced in previous sessions.
@@ -118,12 +118,12 @@ printf '%s\n' <files> | python3 scripts/lib/deploy_config.py classify
 Each line comes back as `<category><TAB><path>` or `uncovered<TAB><path>`. Show Keith a summary of only the files that actually differ, grouped by category:
 
 ```
-Out of sync with Mac Mini:
+Out of sync with Hostinger VPS:
   - .claude/skills/invest-ship/SKILL.md
   - .claude/skills/invest-sync/SKILL.md
   Category: skills
 
-Sync to Mac Mini?
+Sync to Hostinger VPS?
 ```
 
 The category → "needs build / restart" mapping lives in the deploy script itself; the skill does not hardcode it. As of today, no category in K2Bi requires a build step -- `invest-remote` and a dashboard will arrive in later phases and the deploy script will grow build/restart hooks then.
@@ -133,20 +133,20 @@ The category → "needs build / restart" mapping lives in the deploy script itse
 Preview:
 
 ```bash
-~/Projects/K2Bi/scripts/deploy-to-mini.sh --dry-run
+~/Projects/K2Bi/scripts/deploy-to-vps.sh --dry-run
 ```
 
 Actual sync:
 
 ```bash
-~/Projects/K2Bi/scripts/deploy-to-mini.sh auto
+~/Projects/K2Bi/scripts/deploy-to-vps.sh auto
 ```
 
 Or force a single category (any value from `list-categories`):
 
 ```bash
-~/Projects/K2Bi/scripts/deploy-to-mini.sh <category>
-~/Projects/K2Bi/scripts/deploy-to-mini.sh all
+~/Projects/K2Bi/scripts/deploy-to-vps.sh <category>
+~/Projects/K2Bi/scripts/deploy-to-vps.sh all
 ```
 
 ### 4. Verify
@@ -156,13 +156,13 @@ After sync completes, confirm the Mini received what we intended.
 **Skills category (always verifiable):**
 
 ```bash
-ssh macmini "head -3 ~/Projects/K2Bi/CLAUDE.md"
-ssh macmini "ls ~/Projects/K2Bi/.claude/skills/ | wc -l"
+ssh hostinger "head -3 /home/k2bi/Projects/K2Bi/CLAUDE.md"
+ssh hostinger "ls /home/k2bi/Projects/K2Bi/.claude/skills/ | wc -l"
 ```
 
 The deploy script itself runs a skill-count sanity check at the end of a skills sync -- use its output as the primary signal.
 
-**pm2-backed categories (when they exist -- Phase 4+):** check `pm2 status` for the specific daemon the category owns. At the time of this write there are no pm2 daemons in K2Bi yet; when a category gains one, add the verification call here.
+**systemd-backed categories (when they exist -- Phase 4+):** check `systemctl status k2bi-engine.service` on the VPS. At the time of this write the engine runs under systemd; when a category gains its own service, add the verification call here.
 
 **For any sync target:** report what was synced and any warnings.
 
@@ -176,7 +176,7 @@ Tell Keith:
 
 ## Error Handling
 
-- **Mac Mini unreachable:** "Can't reach Mac Mini via SSH. Is it on the network?"
+- **VPS unreachable:** "Can't reach Hostinger VPS via SSH. Is it on the network?"
 - **Build / restart failure (when a future phase adds one):** show the relevant log output; do not attempt the next step until Keith decides.
 - **No changes detected:** "No syncable changes found. Use `/sync all` to force a full sync."
 - **Category unknown to deploy-config.yml:** the helper's error is the canonical message. Keith edits `scripts/deploy-config.yml` to add the category (and its target paths) before re-running `/sync`. The fork-time swap note lives in `scripts/deploy-config.yml` itself.
@@ -185,7 +185,7 @@ Tell Keith:
 
 - **Vault** (`K2Bi-Vault/`) -- handled by Syncthing, not this skill
 - **node_modules/** and **dist/** -- excluded from rsync, rebuilt on Mini (no current K2Bi code has these; applies once invest-remote / a dashboard lands)
-- **store/** -- production SQLite database lives on Mac Mini, NEVER overwrite from MacBook
+- **store/** -- production SQLite database lives on the VPS, NEVER overwrite from MacBook
 - **.env** -- environment config stays local to each machine
 - **.git/** -- each machine has its own git state
 - Anything listed under `excludes:` in `scripts/deploy-config.yml` (hooks, reviewer archives, mailbox)
@@ -195,7 +195,7 @@ Tell Keith:
 After completing the main task, log this skill invocation:
 
 ```bash
-echo -e "$(date +%Y-%m-%d)\tinvest-sync\t$(echo $RANDOM | md5 | head -c 8)\tsynced CATEGORIES to mac mini" >> ~/Projects/K2Bi-Vault/wiki/context/skill-usage-log.tsv
+echo -e "$(date +%Y-%m-%d)\tinvest-sync\t$(echo $RANDOM | md5 | head -c 8)\tsynced CATEGORIES to Hostinger VPS" >> ~/Projects/K2Bi-Vault/wiki/context/skill-usage-log.tsv
 ```
 
 ## Notes

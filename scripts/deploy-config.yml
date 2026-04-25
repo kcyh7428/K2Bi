@@ -1,6 +1,6 @@
-# scripts/deploy-config.yml -- single source of truth for the Mac Mini deploy pipeline.
+# scripts/deploy-config.yml -- single source of truth for the VPS deploy pipeline.
 #
-# Both scripts/deploy-to-mini.sh and the /invest-ship step 12 preflight read this file.
+# Both scripts/deploy-to-vps.sh and the /invest-ship step 12 preflight read this file.
 # The deploy script builds rsync invocations from `targets:`; the preflight validates
 # every top-level repo entry is either covered by `targets:` or explicitly in
 # `excludes:`. Any top-level dir that is neither is a drift signal that blocks /ship
@@ -84,7 +84,8 @@ excludes:
   - proposals
   - plans
   - .claude/plans                # duplicate of above for belt-and-braces parsing
-  # Agent-facing docs (MacBook dev tier only)
+  # Agent-facing docs (operator/developer context — content references MacBook paths,
+  # not deployable to VPS as-is; needs a VPS-variant or path-retarget if VPS deployment ever wanted)
   - AGENTS.md
-  # Tests run locally (Mac Mini runs the engine, not the test suite)
+  # Tests run locally (VPS runs the engine, not the test suite)
   - tests

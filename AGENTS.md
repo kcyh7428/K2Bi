@@ -46,7 +46,7 @@ or delete the `.killed` lock file.
   - `ib_async` -- IBKR connector (m2.5, already in use but not pinned in requirements.txt)
   - `pandas_market_calendars` -- real calendar upgrade (Phase 4)
 - **Process management**: systemd (VPS, Phase 3.9+ via `k2bi-engine.service`); pm2 (Bundle 5 m2.19, deferred to post-3.9)
-- **Deployment**: `rsync` via `scripts/deploy-to-mini.sh` (script rename to `deploy-to-vps.sh` queued for Phase 3.9 Stage 2)
+- **Deployment**: `rsync` via `scripts/deploy-to-vps.sh` (renamed from `deploy-to-mini.sh` in Phase 3.9 Stage 2)
 
 ---
 
@@ -64,7 +64,7 @@ K2Bi/
 ├── scripts/             # Automation, deploy, review wrappers, skill implementations
 │   ├── lib/             # Python modules shared by hooks and skills
 │   ├── deploy-config.yml
-│   ├── deploy-to-mini.sh
+│   ├── deploy-to-vps.sh
 │   ├── review.sh
 │   ├── minimax-review.sh
 │   └── ...
@@ -122,16 +122,16 @@ python -m execution.engine.main --once --account-id DUQ220152
 python -m execution.engine.main --account-id DUQ220152
 ```
 
-### Deploy to Mac Mini
+### Deploy to Hostinger VPS
 ```bash
 # Auto-detect changed categories since last sync
-bash scripts/deploy-to-mini.sh auto
+bash scripts/deploy-to-vps.sh auto
 
 # Dry run
-bash scripts/deploy-to-mini.sh --dry-run
+bash scripts/deploy-to-vps.sh --dry-run
 
 # Single category
-bash scripts/deploy-to-mini.sh execution
+bash scripts/deploy-to-vps.sh execution
 ```
 
 ---
@@ -225,11 +225,11 @@ logged.
 
 ## 8. Deployment Process
 
-Deployment is **manual rsync to the VPS** (Hostinger KL, Phase 3.9+), not CI/CD. The `deploy-to-mini.sh` script name and config still target Mac Mini; rename + retarget to VPS lands in Phase 3.9 Stage 2.
+Deployment is **manual rsync to the VPS** (Hostinger KL, Phase 3.9+), not CI/CD.
 
 1. `scripts/deploy-config.yml` is the single source of truth for deploy categories
    (`skills`, `execution`, `scripts`, `pm2`).
-2. `scripts/deploy-to-mini.sh` reads the config and runs `rsync -av --delete`.
+2. `scripts/deploy-to-vps.sh` reads the config and runs `rsync -av --delete`.
 3. `.sync-state/last-synced-commit` tracks the last deployed SHA.
 4. The preflight (`scripts/lib/deploy_config.py preflight`) blocks `/ship` if any
    top-level repo path is uncovered by `targets:` or `excludes:`.
@@ -269,9 +269,11 @@ NOT managed by a framework like pre-commit).
 - Skipped by `K2BI_SKIP_POST_COMMIT_MIRROR=1`.
 
 ### Adversarial review
-Every commit requires a review pass by a second model (Codex primary, MiniMax M2.7
-fallback). Use `/ship` or `scripts/review.sh` to invoke. Review runs at two
-checkpoints: plan review before implementation, pre-commit review before committing.
+Every commit requires a review pass by a second model (Codex primary, Kimi K2.6
+fallback via `scripts/minimax-review.sh`; legacy MiniMax M2.7 reachable via
+`K2B_LLM_PROVIDER=minimax`). Use `/ship` or `scripts/review.sh` to invoke.
+Review runs at two checkpoints: plan review before implementation, pre-commit
+review before committing.
 
 ---
 

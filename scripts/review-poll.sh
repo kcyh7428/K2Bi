@@ -11,6 +11,8 @@
 #   last_activity_s_ago    seconds since the vendor log last grew
 #   deadline_remaining_s   seconds until hard deadline
 #   reviewer_current       codex|minimax (current attempt)
+#     (when 'minimax', the wrapper script runs whichever provider
+#      K2B_LLM_PROVIDER selects -- Kimi K2.6 by default)
 #   reviewer_attempts      per-attempt exit code + result
 #   fallback_used          true if secondary reviewer ran
 #   exit_code              final exit code (null while running)

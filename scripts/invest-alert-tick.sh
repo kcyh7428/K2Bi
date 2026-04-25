@@ -22,13 +22,23 @@ if [[ -f "$PROJECT_DIR/.env" ]]; then
   set +a
 fi
 
-# Mac Mini location requires Clash Verge proxy for Telegram delivery
-# (Phase 7 / L-2026-03-30-007). Cron does NOT source ~/.zshenv where this
-# is set for interactive shells, so export it here. Idempotent on hosts
-# that already have HTTPS_PROXY set.
-export HTTPS_PROXY="${HTTPS_PROXY:-http://127.0.0.1:7897}"
-export HTTP_PROXY="${HTTP_PROXY:-http://127.0.0.1:7897}"
-export NO_PROXY="${NO_PROXY:-localhost,127.0.0.1}"
+# IMPORTANT: ${VAR-default} (NO COLON) is correct here under `set -u`.
+# Per Stage 1 finding (cc) at K2Bi-Vault/wiki/planning/upcoming-sessions.md:
+# the no-colon form falls back to default ONLY when the variable is UNSET,
+# preserving an explicit empty value (e.g. cron line `HTTPS_PROXY=` to disable
+# the proxy on VPS where Clash is not used). Reviewers may flag this as
+# "unbound under set -u" -- that is a misreading of bash semantics; the `-`
+# operator IS the documented mechanism for safe default-handling. Verified
+# 2026-04-25 evening via executable test (architect ruling per L-2026-04-20-002).
+# DO NOT revert to ${VAR:-default} -- that re-introduces the cron-env trap.
+
+# VPS cron may set HTTPS_PROXY= (empty) to disable proxy use in the KL
+# datacentre. Use non-colon default form so an explicit empty override wins.
+# Cron does NOT source ~/.zshenv where this is set for interactive shells,
+# so export it here. Idempotent on hosts that already have HTTPS_PROXY set.
+export HTTPS_PROXY="${HTTPS_PROXY-http://127.0.0.1:7897}"
+export HTTP_PROXY="${HTTP_PROXY-http://127.0.0.1:7897}"
+export NO_PROXY="${NO_PROXY-localhost,127.0.0.1}"
 
 # Run classifier WITHOUT saving state yet.
 # State is only committed after all Telegram sends succeed.

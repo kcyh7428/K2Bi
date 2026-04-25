@@ -1,11 +1,11 @@
 #!/bin/bash
-# deploy-to-mini.sh -- Sync K2Bi project files from MacBook to Mac Mini.
+# deploy-to-vps.sh -- Sync K2Bi project files from MacBook to Hostinger VPS.
 #
 # Usage:
-#   deploy-to-mini.sh              # auto-detect what changed, sync those categories
-#   deploy-to-mini.sh <category>   # force a single category from deploy-config.yml
-#   deploy-to-mini.sh all          # sync every category
-#   deploy-to-mini.sh --dry-run    # show what would sync without doing it
+#   deploy-to-vps.sh              # auto-detect what changed, sync those categories
+#   deploy-to-vps.sh <category>   # force a single category from deploy-config.yml
+#   deploy-to-vps.sh all          # sync every category
+#   deploy-to-vps.sh --dry-run    # show what would sync without doing it
 #
 # The category list + the set of paths each category covers live in
 # scripts/deploy-config.yml. Both this script and the /invest-ship step 12
@@ -13,15 +13,19 @@
 # deployed path: append to deploy-config.yml's `targets:`. To add an
 # intentionally-local path: append to `excludes:`. The preflight will block
 # /ship until the drift is resolved.
+#
+# Phase 3.9 Stage 2 renamed this script from deploy-to-mini.sh to
+# deploy-to-vps.sh and retargeted it from the Mac Mini to the Hostinger KL VPS.
 
 set -euo pipefail
 
-MINI="macmini"
+VPS="hostinger"
 LOCAL_BASE="$HOME/Projects/K2Bi"
-REMOTE_BASE="~/Projects/K2Bi"
+REMOTE_BASE="/home/k2bi/Projects/K2Bi"
 CONFIG_HELPER="$LOCAL_BASE/scripts/lib/deploy_config.py"
 DRY_RUN=false
 MODE=""
+RESTART_FAILED=false
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -73,7 +77,7 @@ detect_changed_categories() {
 
 rsync_target() {
     # rsync one deploy-config.yml target (file or directory). Handles the
-    # local-deleted-but-remote-present case so the Mini mirrors deletions.
+    # local-deleted-but-remote-present case so the VPS mirrors deletions.
     local local_rel="$1"    # path relative to LOCAL_BASE; from config verbatim
     local rsync_flag=""
     $DRY_RUN && rsync_flag="--dry-run"
@@ -82,17 +86,17 @@ rsync_target() {
     if [[ -d "$LOCAL_BASE/$stripped" ]]; then
         rsync -av $rsync_flag --delete \
             --exclude '__pycache__/' --exclude '*.pyc' --exclude '.venv/' \
-            "$LOCAL_BASE/$stripped/" "$MINI:$REMOTE_BASE/$stripped/"
+            "$LOCAL_BASE/$stripped/" "k2bi@$VPS:$REMOTE_BASE/$stripped/"
     elif [[ -f "$LOCAL_BASE/$stripped" ]]; then
-        rsync -av $rsync_flag "$LOCAL_BASE/$stripped" "$MINI:$REMOTE_BASE/$stripped"
+        rsync -av $rsync_flag "$LOCAL_BASE/$stripped" "k2bi@$VPS:$REMOTE_BASE/$stripped"
     else
         if $DRY_RUN; then
-            warn "  (dry-run) would remove $MINI:$REMOTE_BASE/$stripped if present"
+            warn "  (dry-run) would remove k2bi@$VPS:$REMOTE_BASE/$stripped if present"
             return 0
         fi
         # Mirror local deletion to remote so state stays consistent.
         local result
-        result=$(ssh "$MINI" "
+        result=$(ssh "k2bi@$VPS" "
             if [ -d $REMOTE_BASE/$stripped ]; then
                 rm -rf $REMOTE_BASE/$stripped && echo REMOVED_DIR
             elif [ -f $REMOTE_BASE/$stripped ]; then
@@ -123,16 +127,40 @@ sync_category() {
     done <<< "$targets"
 
     # Skills category preserves the Phase 1 verify-count sanity check so a
-    # drift between MacBook and Mini skill-folder counts surfaces loudly.
+    # drift between MacBook and VPS skill-folder counts surfaces loudly.
     if [[ "$category" == "skills" ]] && ! $DRY_RUN; then
         local remote_count local_count
-        remote_count=$(ssh "$MINI" "ls -d $REMOTE_BASE/.claude/skills/*/ 2>/dev/null | wc -l" | tr -d ' ')
+        remote_count=$(ssh "k2bi@$VPS" "ls -d $REMOTE_BASE/.claude/skills/*/ 2>/dev/null | wc -l" | tr -d ' ')
         local_count=$(ls -d "$LOCAL_BASE/.claude/skills/"*/ 2>/dev/null | wc -l | tr -d ' ')
         if [[ "$remote_count" == "$local_count" ]]; then
             log "  skills verified: $remote_count skill folders on both machines"
         else
             warn "  skills count mismatch: local=$local_count remote=$remote_count"
         fi
+    fi
+
+    # After-sync service restart for categories that need it.
+    # Phase 3.9 Stage 2: the VPS runs the engine under systemd, not pm2.
+    if ! $DRY_RUN; then
+        case "$category" in
+            execution)
+                log "  restarting k2bi-engine.service on VPS"
+                ssh "k2bi@$VPS" "sudo systemctl restart k2bi-engine.service" || {
+                    err "  RESTART FAILED for category '$category': k2bi-engine.service did not restart cleanly. Sync sentinel will NOT advance; re-run /sync after resolving the restart issue."
+                    RESTART_FAILED=true
+                }
+                ;;
+            pm2)
+                # Historical category name: on the VPS this maps to the same
+                # systemd service as execution. Kept as `pm2` in deploy-config.yml
+                # so downstream readers (skills, preflight) need no rename.
+                log "  restarting k2bi-engine.service on VPS (pm2 category -> systemd)"
+                ssh "k2bi@$VPS" "sudo systemctl restart k2bi-engine.service" || {
+                    err "  RESTART FAILED for category '$category': k2bi-engine.service did not restart cleanly. Sync sentinel will NOT advance; re-run /sync after resolving the restart issue."
+                    RESTART_FAILED=true
+                }
+                ;;
+        esac
     fi
 }
 
@@ -190,8 +218,8 @@ esac
 
 # --- execute --------------------------------------------------------------
 
-if ! ssh -o ConnectTimeout=5 "$MINI" "echo ok" &>/dev/null; then
-    err "Cannot reach Mac Mini (ssh $MINI). Is it on?"
+if ! ssh -o ConnectTimeout=5 "k2bi@$VPS" "echo ok" &>/dev/null; then
+    err "Cannot reach Hostinger VPS (ssh k2bi@$VPS). Is it on?"
     exit 1
 fi
 
@@ -199,7 +227,7 @@ fi
 # The rsync commands build directory structure as they go, but a first-time
 # deploy into a virgin REMOTE_BASE needs the parent there.
 REMOTE_MKDIRS=$(python3 "$CONFIG_HELPER" list-targets | awk -F/ '{if ($1 != $0) print $1}' | sort -u)
-ssh "$MINI" "mkdir -p $REMOTE_BASE $(echo "$REMOTE_MKDIRS" | awk -v base="$REMOTE_BASE" '{print base"/"$0}' | tr '\n' ' ')" || {
+ssh "k2bi@$VPS" "mkdir -p $REMOTE_BASE $(echo "$REMOTE_MKDIRS" | awk -v base="$REMOTE_BASE" '{print base"/"$0}' | tr '\n' ' ')" || {
     err "Failed to create remote base directories"
     exit 1
 }
@@ -220,6 +248,11 @@ while IFS= read -r cat; do
 done <<< "$RUN_CATEGORIES"
 
 echo ""
+if $RESTART_FAILED; then
+    err "Deploy NOT recorded -- one or more systemctl restarts failed during sync. Working tree is rsync'd but engine state is uncertain. Re-run after resolving the restart issue (likely missing sudoers rule on VPS for k2bi user; see K2Bi-Vault/wiki/planning/feature_vps-migration.md gotcha #9)."
+    exit 3
+fi
+
 if $DRY_RUN; then
     log "Dry run complete. Run without --dry-run to sync."
 else

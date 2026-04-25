@@ -6,7 +6,9 @@ Three guarantees:
      10s later if the child still hasn't exited.
   2. Fallback: if the primary reviewer (Codex by default) exits non-zero
      or hits the deadline, automatically retry on the secondary reviewer
-     (MiniMax) for the same scope. If both fail, exit code 2.
+     (Kimi K2.6 via scripts/minimax-review.sh by default; legacy MiniMax
+     M2.7 via K2B_LLM_PROVIDER=minimax) for the same scope. If both fail,
+     exit code 2.
   3. Visibility: a watchdog thread injects synthetic HEARTBEAT lines into
      the unified log every --heartbeat-interval seconds (default 5s)
      regardless of vendor-side activity, and escalates to HEARTBEAT_STALE
@@ -14,9 +16,10 @@ Three guarantees:
      what makes `scripts/review-poll.sh` always show *something* new, so
      Claude can never mistake "in final inference" for "wedged".
 
-Nothing in this file calls the Bash tool; Codex and MiniMax are spawned
-via subprocess.Popen, so the .claude PreToolUse guard hook does not block
-them -- the hook only fires on direct user-invoked Bash calls.
+Nothing in this file calls the Bash tool; Codex and the Kimi-backed
+reviewer are spawned via subprocess.Popen, so the .claude PreToolUse
+guard hook does not block them -- the hook only fires on direct
+user-invoked Bash calls.
 """
 
 from __future__ import annotations
@@ -86,8 +89,8 @@ def _working_tree_eisdir_hazard(repo_root: Path) -> str | None:
     <1s. Observed during Cycle 7: nested git worktrees (gitignored but
     physically present) and untracked top-level directories both trigger
     this. We pre-detect both shapes so the wrapper can skip Codex and
-    route to MiniMax immediately instead of logging a failed attempt
-    on every call.
+    route to the Kimi-backed reviewer immediately instead of logging a
+    failed attempt on every call.
     """
     # Case 1: untracked directories visible to git as `??` (not gitignored).
     # --directory collapses each entirely-untracked dir into a single
@@ -136,14 +139,16 @@ def codex_unavailable_reason(scope: str, repo_root: Path,
     """
     if scope == "plan":
         return ("plan scope requires --path which current codex-companion.mjs "
-                "dropped; plan reviews always route to MiniMax")
+                "dropped; plan reviews always route to the Kimi-backed "
+                "reviewer (legacy wrapper minimax-review.sh)")
     companion = codex_plugin / "scripts" / "codex-companion.mjs"
     if not companion.is_file():
         return f"codex-companion.mjs not found at {companion}"
     hazard = _working_tree_eisdir_hazard(repo_root)
     if hazard is not None:
         return (f"codex --scope working-tree would EISDIR on '{hazard}'; "
-                f"routing to MiniMax until the path is removed or committed")
+                f"routing to the Kimi-backed reviewer until the path is "
+                f"removed or committed")
     return None
 
 
@@ -152,7 +157,8 @@ def build_codex_cmd(scope: str, files: list[str] | None, plan: str | None,
     """Return argv for Codex companion, or None when Codex can't handle scope.
 
     Skip conditions are centralized in codex_unavailable_reason(); if that
-    returns a string the wrapper logs the reason and falls back to MiniMax.
+    returns a string the wrapper logs the reason and falls back to the
+    Kimi-backed reviewer.
     Verified against live `codex-companion.mjs --help` on 2026-04-19:
 
       Usage:
@@ -174,8 +180,10 @@ def build_codex_cmd(scope: str, files: list[str] | None, plan: str | None,
       "working-tree"   -> adversarial-review --wait --scope working-tree [focus]
       "files"          -> adversarial-review --wait --scope working-tree [focus]
                           (Codex loses the subset; callers wanting subset
-                          fidelity should use --primary minimax.)
-      "plan"           -> None  (forces fallback to MiniMax)
+                          fidelity should use --primary minimax, where
+                          "minimax" is the wrapper-script identifier that
+                          routes to Kimi K2.6 by default.)
+      "plan"           -> None  (forces fallback to the Kimi-backed reviewer)
     """
     if codex_unavailable_reason(scope, REPO_ROOT, codex_plugin) is not None:
         return None
@@ -381,6 +389,8 @@ def run_one_reviewer(
 def run_fallback_chain(args: argparse.Namespace, job: str, log_path: Path,
                        state_path: Path, state: dict) -> int:
     primary = args.primary
+    # "minimax" here is the wrapper-script identifier (historical name);
+    # the wrapper routes to Kimi K2.6 by default since c04f603.
     secondary = "minimax" if primary == "codex" else "codex"
     files = ([p.strip() for p in args.files.split(",") if p.strip()]
              if args.files else None)
@@ -523,7 +533,10 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="Unified code-review runner (Codex + MiniMax fallback)."
+        description=(
+        "Unified code-review runner (Codex primary + Kimi-backed reviewer "
+        "fallback; legacy MiniMax M2.7 via K2B_LLM_PROVIDER=minimax)."
+    )
     )
     p.add_argument("scope", nargs="?",
                    choices=["diff", "working-tree", "files", "plan"],
