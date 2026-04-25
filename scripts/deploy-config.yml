@@ -84,5 +84,7 @@ excludes:
   - proposals
   - plans
   - .claude/plans                # duplicate of above for belt-and-braces parsing
+  # Agent-facing docs (MacBook dev tier only)
+  - AGENTS.md
   # Tests run locally (Mac Mini runs the engine, not the test suite)
   - tests

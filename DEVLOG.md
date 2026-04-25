@@ -1036,3 +1036,18 @@ This commit also extracts the previously inline mailbox-scan Python heredoc from
 - Codex reviewer pattern: launch `codex-companion.mjs` via `Bash run_in_background: true` + `Monitor` tail with `grep --line-buffered` filtering on `Running command:|Command completed|Turn completed|Turn failed|reconnect|Error|ERROR|P0|P1|^# Codex Review|Traceback`. The `codex:rescue` subagent was wrong here -- it hides progress end-to-end, making the session look hung for the full 5 minutes. Keith flagged this inline; captured in `self_improve_learnings.md` as L-2026-04-19-001 with a policy-ledger guard.
 - `handle_approve_limits` ordering resolved via R4-R6 MiniMax + Codex R2: pre-compute proposal rewrite in memory, apply config patch (yaml.safe_load validates), write proposal, roll config back on proposal-write failure, refuse rollback on concurrent-mod detection. This gives atomic-pair semantics from the caller's perspective under the single-operator invariant; git staging + pre-commit Check C add a second gate at commit time.
 - Canonical-path gate added in response to Codex R1 P1#1: strategy subcommands now refuse to operate on any path outside `wiki/strategies/strategy_*.md` (the hook's glob) so a retire never slips past the cycle-4 post-commit sentinel write. Path resolution uses `git rev-parse --show-toplevel` to rebase absolute-path arguments and falls back to the raw path string on git failure (tested).
+
+## 2026-04-25 -- Bundle 5a m2.9 invest-alert MVP
+
+feat(alert): journal-poll Telegram alerting pipeline.
+- `scripts/invest_alert_lib.py`: Tier 1/2 classifier with outage fire-once,
+  idempotency via `journal_entry_id`, state corruption recovery.
+- `scripts/send-telegram.sh`: Telegram sender with message chunking.
+- `scripts/invest-alert-tick.sh`: cron wrapper, commits state only after
+  successful delivery (MiniMax review finding fix).
+- `scripts/invest-alert-test.sh`: test primitive.
+- 29 tests (24 unit + 5 integration), all passing.
+- Commit: `b9b9079`
+- Deployed to Mac Mini (scripts + skills categories).
+- Cron active: `* * * * *` tick every minute.
+- Test alert sent to production chat ID successfully.
