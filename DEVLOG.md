@@ -1,3 +1,63 @@
+## 2026-04-26 -- Q42 orphan-STOP adoption SHIPPED -- Phase 3.6 Day 1 STOP permId=1888063981 now first-class journal event; VPS Step 4 production validation pending (will eliminate K2BI_ALLOW_RECOVERY_MISMATCH=1 requirement for permId=1888063981 on cold-start)
+
+**Commit:** `39a7234` feat: Q42 orphan-STOP adoption workflow (K2BI_ADOPT_ORPHAN_STOP)
+
+**What shipped:**
+- New journal event `orphan_stop_adopted` (additive, no SCHEMA_VERSION bump per D1.a evolution rule). Field-level validation in `validate_orphan_stop_adopted_payload()` separate from `validate()` to preserve cheap-checks-only contract.
+- New env var `K2BI_ADOPT_ORPHAN_STOP=<permId>:<justification>` parsed by `recovery._parse_adopt_orphan_stop()`; fail-closed on malformed input via `sys.exit(78)` at engine startup.
+- `recovery.py` adoption write path: when env var set AND broker has matching permId AND order_type in (`STP`, `STP LMT`), writes `orphan_stop_adopted` event and removes ONLY the matching `phantom_open_order` mismatch. Per-permId scope; Q31 `protective_stop_price_drift` and other safety mismatches survive adoption.
+- `seen_broker_ids` pre-populated from journaled `orphan_stop_adopted` events so subsequent cold-starts within 48h lookback recognize adopted permIds.
+- `BrokerOpenOrder.order_type` field added; `ibkr.py` wires from `ib_async.Order.orderType`. Default `""` is FAIL-CLOSED for adoption gate (TRAIL/empty/unknown all rejected).
+- `execution/engine/main.py`: reads `K2BI_ADOPT_ORPHAN_STOP` at recovery startup, fatal `sys.exit(78)` on parse failure (config error before any state mutation).
+- 10 Q42 tests added to `tests/test_engine_recovery.py` (1063 -> 1073 passing).
+
+**Review trail and architect dispositions:**
+
+| Round | Reviewer | Verdict | Findings |
+|-------|----------|---------|----------|
+| R1 | MiniMax M2.7 (forced via `K2B_LLM_PROVIDER=minimax`; plan-scope wrapper hardcodes Codex skip per dropped --path) | APPROVE | No findings |
+| R2 | Codex (Checkpoint 2 R1 on diff scope) | NEEDS-ATTENTION | 2 P1: filter too broad, aux_price too weak vs TRAIL |
+| R3 | Codex (Checkpoint 2 R2 after P1 fixes) | APPROVE | No material findings |
+
+- **R2 P1 #1 (HIGH) Adoption filter erased ALL mismatches with matching permId, including Q31 `protective_stop_price_drift`:** FIXED. Filter narrowed to `case == "phantom_open_order" AND matching permId`. `protective_stop_price_drift` and other safety cases preserved across adoption.
+- **R2 P1 #2 (HIGH) `aux_price > 0` couldn't distinguish STP from TRAIL:** FIXED. Added `BrokerOpenOrder.order_type` field (default `""` fail-closed); ibkr.py wires from `ib_async.Order.orderType`; adoption requires `order_type in ("STP", "STP LMT")`. TRAIL and empty order_type both rejected.
+
+**Cross-model review path:** Plan scope (Checkpoint 1) hardcoded by current `scripts/review.sh` to skip Codex (codex-companion.mjs lacks --path support); forced legacy MiniMax M2.7 explicitly via `K2B_LLM_PROVIDER=minimax` to honor architect's capital-path "no silent fallback to default Kimi-backed reviewer" binding. Pre-commit reviews (Checkpoint 2 R1 + R2; working-tree diff scope) ran on Codex normally.
+
+**Architect rulings (kickoff Decisions D1 + D3):**
+- **D1.a:** No SCHEMA_VERSION bump for additive event type. Aligns with the existing schema evolution-rule docstring + m2.23 precedent. Kickoff spec's claim that new event types bump SCHEMA_VERSION was stale; codebase rule is authoritative.
+- **D3:** 48h `journal_tail` lookback boundary acceptable for adoption recognition. VPS engine runs continuously so cold-starts are within lookback in practice. >48h cold-start gap would re-flag the orphan; long-tail mitigation tracked for Phase 4+ (extend `engine_recovered` checkpoint to carry forward `adopted_orphan_perm_ids`). Out of scope this ship.
+
+**Stop rule:** P1=0, P2 isolated, both Codex rounds clear. Capital-path aggressive bucket satisfied.
+
+**VPS production validation:** pending post-ship per plan §Step 5. Adoption env var injection on systemd unit, restart, journal verify, override removal, clean-restart confirmation. Rollback path = re-add `K2BI_ALLOW_RECOVERY_MISMATCH=1` if validation fails. After Step 4 passes clean, this DEVLOG entry will be amended via a separate small follow-up commit (mirrors `c0c3d18` style) confirming "Step 4 production validation PASSED [timestamp]; K2BI_ALLOW_RECOVERY_MISMATCH=1 confirmed not required for permId=1888063981 on VPS cold-start."
+
+**Follow-ups (architect-filed; NOT blocking Q42):**
+
+*8 pre-existing test failures (verified via `git stash` to predate Q42; Q42 did not touch the affected code paths):*
+
+| Test | Assertion failure | Likely cause bucket |
+|------|-------------------|---------------------|
+| `test_engine_main.py::OrderSubmissionTests::test_cancel_request_defers_terminal_journal` | `Lists differ: [] != ['1000']` | terminal-journal list empty when cancel should defer order_id 1000 |
+| `test_engine_main.py::OrderSubmissionTests::test_fill_transitions_to_connected_idle` | `0 != 1` | orders_filled counter not incrementing on first poll after fill |
+| `test_engine_main.py::FillDedupeTests::test_same_exec_id_not_counted_twice` | `0 != 1` | orders_filled counter not reaching 1 on first journaled fill |
+| `test_engine_once_barrier.py::OnceExitBarrierTests::test_barrier_journal_write_failure_does_not_silently_swallow` | `_JournalWriteError not raised` | mock journal failure not propagating up the barrier path |
+| `test_engine_once_barrier.py::OnceExitBarrierTests::test_barrier_respects_custom_timeout_config` | `0 != 1` | barrier event count not 1 after custom timeout fires |
+| `test_engine_once_barrier.py::OnceExitBarrierTests::test_barrier_timeout_payload_matches_architect_shape` | `unexpectedly None` | barrier event payload absent (event itself not emitted) |
+| `test_engine_once_barrier.py::OnceExitBarrierTests::test_barrier_times_out_and_emits_event` | `0 != 1` | barrier event count not 1 after timeout |
+| `test_engine_once_barrier.py::OnceExitBarrierTests::test_q39b_consumes_barrier_timeout_event` | `0 != 1` | Q39-B did not consume barrier_timeout journal record |
+
+Pattern: 6 of 8 failures are "expected event count not reaching 1" + 1 mock-error-not-propagating + 1 list-mismatch. Common signature suggests a shared async-event-loop or fixture-setup change pre-Q42 that broke event emission/journaling timing in the engine_main + once_barrier flows. Q42 did not modify those code paths. Triage candidates: (a) test infra flakes from a recent pytest/asyncio bump, (b) real engine bugs in fill/cancel/barrier paths Q42 doesn't trigger, (c) known issues missing context. A future K2Bi session can disambiguate from the failure summaries above.
+
+*Other follow-ups:*
+- **`scripts/review.sh` plan-scope hardcoded Codex skip** (real wrapper-side defect): plan reviews always route to the Kimi-backed reviewer because "current codex-companion.mjs dropped --path". Architect's L-2026-04-19-001 "Codex first" pattern can't be honored for plan scope until --path support is restored. `K2B_LLM_PROVIDER=minimax` is the correct override for now. Track as separate item: either document in invest-ship SKILL.md or file a wrapper fix.
+- **Phase 4+ engine_recovered carry-forward** of `adopted_orphan_perm_ids` for >48h cold-start gaps. D3 long-tail home; not gating.
+- **Codex R2 optional integration test** for `phantom_open_order + protective_stop_price_drift` coexistence on same permId driving through full `reconcile()` (current coverage is unit-level filter check; sufficient per Codex R2 verbatim "No material findings"). Nice-to-have.
+- **Kickoff doc amendment** for SCHEMA_VERSION-bump rule (D1.a) at `K2Bi-Vault/wiki/planning/upcoming-sessions.md` finding (x). Architect note: codebase docstring rule is authoritative; future Q-series tickets should not replay this. Small post-Q42 cleanup; not gating.
+- **Architect-side process learning:** plan-scope review (text-only, prose-grounded) missed both capital-path P1 findings that diff-scope review (text + code-walk against codebase invariants) caught. Specifically: the filter-precision flaw (silent erasure of Q31 `protective_stop_price_drift` for the adopted permId) and the order-type-ambiguity flaw (TRAIL vs STP indistinguishable from `aux_price` alone) require reading the existing safety-invariant code paths to surface; pure plan-prose review approves on architectural shape only. Memorialize as `/learn` entry post-ship: capital-path plan reviews benefit from a follow-up code-aware diff review even when plan review approves; same-mode-twice (plan-review-only, or diff-review-only) misses cross-mode gaps.
+
+**Key decisions:** D1.a (no SCHEMA_VERSION bump), D3 (48h lookback acceptance), per-permId adoption scope (defense in depth), STP-only restriction with explicit `order_type` gate (not `aux_price` heuristic), per-permId mismatch-removal narrowed to `case == "phantom_open_order"` (Q31 invariants survive adoption).
+
 ## 2026-04-26 -- Phase 3.6.5 invest-narrative Ship 1 SHIPPED -- top-of-funnel ticker discovery skill manual MVP; first theme file produced at wiki/macro-themes/theme_ai-compute-demand-drives-semiconductor-capex.md
 
 **Commit:** `295d898` Phase 3.6.5 invest-narrative Ship 1 SHIPPED -- top-of-funnel ticker discovery skill manual MVP; first theme file produced at wiki/macro-themes/theme_ai-compute-demand-drives-semiconductor-capex.md
