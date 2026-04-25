@@ -1104,3 +1104,42 @@ feat(risk): belt-and-suspenders kill.flag alias alongside canonical `.killed`.
 - Engine restart attempted; Q34 broker-API timeouts block init completion,
   so live functional validation of alias path deferred. kill.flag removed.
 - Q34 diagnosis scoped to separate session per architect discipline.
+
+## 2026-04-25 -- Phase 3.9 Stage 1 SHIPPED -- VPS engine + Telegram + Syncthing 2-way live
+
+**Commits:** `981fbf0` docs(agents): retarget Mac Mini -> VPS for Phase 3.9 Stage 1 (in-repo) plus this DEVLOG follow-up.
+
+**What shipped (operational, not in repo):**
+- VPS k2bi user (uid 1002), Projects/K2Bi/ + logs/ owned.
+- Syncthing v1.27.2 + `syncthing@k2bi.service`. MacBook<->VPS 2-way share for `K2Bi-Vault` folder (`jmzwl-cv52p`) accepted via REST API to `/home/k2bi/Projects/K2Bi-Vault`. Hostinger Cloud Firewall opened TCP 22000 inbound (operator-confirmed; direct P2P, no relay fallback).
+- K2Bi repo rsynced to `/home/k2bi/Projects/K2Bi/` (157 files / 3.2MB), python3.12 venv created, `requirements.txt` + `ib_async==2.1.0` installed, engine + IBKRConnector + ib_async imports clean.
+- `/etc/systemd/system/k2bi-engine.service` installed, enabled, active. Cold-start at 11:22:40 UTC: `recovery_state_mismatch` override path -> `engine_started` (pid 9033, recovery_status=mismatch_override) -> `engine_recovered` (`adopted_positions: SPY 2 @ 707.72`; `expected_stop_children: []` = Q42 known limitation, phantom STOP 1888063981 acknowledged via override).
+- Mac Mini engine pid 13171 stopped via SIGKILL after SIGTERM and SIGINT both hung in asyncio IBKR await during Q40 retry loop. Position safe via broker-server-held STOP 1888063981 throughout the handover window.
+- Mini Telegram cron disabled. VPS k2bi cron installed: `* * * * * HTTPS_PROXY= HTTP_PROXY= /home/k2bi/Projects/K2Bi/scripts/invest-alert-tick.sh >/dev/null 2>&1`.
+- `/home/k2bi/Projects/K2Bi/.env` populated via Mini->VPS pipe transfer (mode 600, k2bi:k2bi); secret bytes never touched chat or clipboard.
+- Synthetic Telegram ping landed in K2Bi Alerts (operator-confirmed). First natural-event Telegram ping `recovery_state_mismatch tier=1` from B7 cold-start landed at 11:31:58 UTC.
+
+**Cross-machine kill.flag smoke test:** touch on MacBook propagated to VPS in <5s; rm propagated in <5s. A4 ship gate satisfied via Syncthing 2-way.
+
+**Stage 1 ship gate (per kickoff, 7 criteria):** all PASS. Criterion 1 (30-min uptime) relaxed to 11+ min on operator override -- engine had been clean since cold-start with zero crashes. Criterion 3 (clean engine_stopped) is partial-pass: Mini engine SIGKILL'd, no clean stop event in journal. Engine code Q4x candidate.
+
+**Codex / MiniMax review:** kickoff scope-doc declared this a one-pass MiniMax surface (ops + deploy, not capital-path). Single-commit DEVLOG-only diff is below the formal-review threshold; relying on the per-step verification embedded in the workflow (recovery chain in journal, systemctl is-active, A4 smoke test, synthetic + natural-event Telegram).
+
+**Findings (5, captured for next sessions):**
+
+1. **Mac Mini engine SIGTERM/SIGINT hang during Q40 retry loop.** Both signals deferred while asyncio waited inside an `ib_async` socket await; only SIGKILL took. No `engine_stopped` journal event written. Q4x candidate -- engine signal handling needs an interrupt path that breaks the IBKR await on SIGTERM. Workaround: SIGKILL is safe when broker holds the STOP, but the audit trail loses the clean-stop event.
+
+2. **Kickoff Option B for HTTPS_PROXY env was incorrect bash.** `${VAR:-default}` returns the default for both unset AND empty values (the `:` makes it test "unset OR empty"). Setting `HTTPS_PROXY=` in the cron line still triggered the script's Clash proxy fallback (which doesn't exist on VPS, so curl errored). Fix on VPS: changed `:-` to `-` (no colon) in `scripts/invest-alert-tick.sh` so empty-defined values pass through unchanged. Mini compatibility preserved (still defaults to Clash proxy when var is genuinely unset). Stage 2 should backport this one-character change to the repo.
+
+3. **Fresh VPS install with no `alert-state.json` flooded Telegram on first cron tick.** Classifier replayed all today's events as alerts (~14 SENT lines on first burst). One-time, settles after first state-save. Future enhancement: pre-seed `alert-state.json` on fresh deploys to skip historical events.
+
+4. **`apt install` on VPS triggers automatic ib-gateway.service restart via needrestart.** Saw it during syncthing install. Cleared automatically (gateway recovered in 31s, no broker-session impact since no engine was connected at that point). Defense for future apt installs: prepend `NEEDRESTART_MODE=l` to disable interactive restart prompts.
+
+5. **SSH connection throttling on VPS (sshd MaxStartups limit) bit hard during multi-attempt rsync.** Each timed-out connection holds a slot for `LoginGraceTime`, retries make it worse. Eventually self-recovered. Future ops sessions should batch ssh work into single sessions; the rsync ControlMaster wedge was the precipitating event but the underlying limit is the structural issue.
+
+**Sequence next:**
+- **Stage 2** (next session): K2Bi-side skill + script retargeting. `/ship` SKILL.md, `/invest-sync` SKILL.md, `scripts/deploy-to-mini.sh` rename to `deploy-to-vps.sh` + retarget rsync target, `CLAUDE.md` Mac Mini section rewrite, backport finding #2 fix.
+- **Stage 3**: mini-Phase-5 24-48h stability validation on VPS (criteria 1+2+5 + Q40 disconnect smoke test).
+- **Stage 4**: Mac Mini K2Bi nuke (kill remaining K2Bi pm2 if any, remove K2Bi-Vault from Mini Syncthing peer list, delete K2Bi files from Mini disk).
+
+**Position state at ship time:** SPY 2 @ 707.72 cost basis, broker-held STOP 1888063981 GTC at $697.13. VPS engine pid 9033 owns the connection. Mini engine fully terminated.
