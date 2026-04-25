@@ -1343,3 +1343,26 @@ feat(risk): belt-and-suspenders kill.flag alias alongside canonical `.killed`.
 - Deferred (not applied) the Codex cosmetic suggestion. The K2B sha reference is informative for sibling-repo cross-referencing, and the local code pointer can be added cheaply on a later edit. Auto-mode action vs interruption tradeoff favored ship-as-spec'd.
 - Kept Mini's `~/Jts/` and `~/ibc/` intact rather than uninstalling IB Gateway -- conservative call given uncertainty about K2B-side shared usage. If K2B side wants them gone, it owns that operation.
 
+
+## 2026-04-26 -- invest-narrative Ship 2 SHIPPED -- two-call pipeline, 5 validators, canonical registry, --promote flag
+
+**Commit:** `85c39d4` feat: invest-narrative Ship 2 -- two-call pipeline, validators, registry, promote
+
+**What shipped:** Full Ship 2 implementation of the invest-narrative decomposition pipeline. Replaces the Ship 1 single-call architecture with a two-call LLM pattern (Call 1 = 4-6 sub-themes + value chains; Call 2 = 2-3 candidate tickers per sub-theme). Adds a canonical ticker registry built from the NASDAQ screener API (6791 NASDAQ + NYSE entries, atomic JSON write). Adds 5 hardcoded Python validators: `validate_ticker_exists` (case-insensitive registry lookup), `validate_market_cap` (yfinance `$2B` floor with `fast_info` fallback), `validate_liquidity` (30-day avg dollar volume `$10M` floor), `validate_priced_in` (flag-not-block at `>90%` in 90d), and `validate_citation_url` (HEAD with browser User-Agent, GET fallback on any failure). Adds `--promote <SYMBOL>` CLI flag that atomically writes a complete Stage-1 watchlist entry per the schema defined in `feature_invest-narrative-mvp.md` (lines 99-144), including `narrative_provenance`, `reasoning_chain`, `citation_url`, `order_of_beneficiary`, and `ark_6_metric_initial_scores`. Idempotent re-run detects existing `status: promoted` and backfills missing index/log entries without rewrite. Refuses to overwrite non-promoted existing watchlist files.
+
+**Test report:** 66 new tests across 3 files, all green. Full suite: 467 passed, 1 skipped, 2 warnings (1 pre-existing engine test failure unrelated to this change: `test_cancel_request_defers_terminal_journal` in `test_engine_main.py`).
+
+**Codex review:** 14 rounds total (R1-R14). R1-R13 surfaced P1/P2 findings that were fixed inline: citation URL slice bug (`[source](URL)` parsing), malformed sub-theme filtering before theme file build, GET fallback expansion to cover `URLError`/timeout/`OSError`, deduplication after validation (not before), order normalization to canonical `1st`/`2nd`/`3rd`, ARK scores dict enforcement with 6 keys, 2nd/3rd-order beneficiary gate after dedup, registry fail-fast before LLM calls, malformed candidate guards, and macro-themes index exact-match dedup. R14 (final) APPROVED with zero material findings after all fixes applied.
+
+**Feature status change:** `feature_invest-narrative-mvp.md` Ship 2 row `designed` -> `shipped` (2026-04-26). Frontmatter updated: `status: ship-2-shipped`, `ship-2-shipped-date: 2026-04-26`. Feature-level status remains `ship-2-shipped` (not `shipped` overall) because Ship 3 is still planned (deferred until Ship 2 used >=5 times).
+
+**Follow-ups:**
+- Ship 3: stateful narratives with periodic refresh + news-feed integration. Gate: Ship 2 used >=5 times AND Keith confirms weekly refresh would be valuable. Otherwise stays parked.
+- m2.13 invest-screen: now unblocked. Ship 2 owns Stage-1 watchlist fields; m2.13 reads `status: promoted` entries and adds Stage-2 enrichment (`quick_score`, `sub_factors`, `band_definition_version`).
+- Registry refresh: quarterly or when `unknown_ticker` rate exceeds 5% over 10 runs. Documented in `wiki/tickers/index.md`.
+- yfinance TLS/curl mismatch on macOS build host: validators gracefully skip rather than auto-reject. Production VPS should not have this issue.
+
+**Key decisions:**
+- kimi-handoff route chosen for Ship 2 (same as Ship 1) because the spec was concrete and the work was mechanical Python plumbing. Cross-model review discipline enforced: Codex primary, 14 rounds, no silent Kimi self-review.
+- Dependency inversion: Ship 2 now OWNS the watchlist schema and writes Stage-1 fields. m2.13 invest-screen ships LATER as the consumer/enricher. This was the Option 2 re-scope from the 2026-04-25 architect planning sweep.
+- Stage-2 fields (`quick_score`, `quick_score_breakdown`, `sub_factors`, `band_definition_version`) are explicitly excluded from `--promote` output per spec boundary. m2.13 owns them.
