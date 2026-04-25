@@ -1,3 +1,48 @@
+## 2026-04-26 -- Phase 3.6.5 invest-narrative Ship 1 SHIPPED -- top-of-funnel ticker discovery skill manual MVP; first theme file produced at wiki/macro-themes/theme_ai-compute-demand-drives-semiconductor-capex.md
+
+**Commit:** `295d898` Phase 3.6.5 invest-narrative Ship 1 SHIPPED -- top-of-funnel ticker discovery skill manual MVP; first theme file produced at wiki/macro-themes/theme_ai-compute-demand-drives-semiconductor-capex.md
+
+**What shipped:**
+- New skill `.claude/skills/invest-narrative/SKILL.md` with locked-verbatim SYSTEM+USER prompt from spec lines 156-200
+- Skill frontmatter: tier=Analyst, routines-ready=yes, ship=1-of-3
+- Output template for `wiki/macro-themes/theme_<slug>.md` with full frontmatter discipline (origin: k2bi-extract, status: candidates-pending-review)
+- Regression-test theme file produced in vault: `theme_ai-compute-demand-drives-semiconductor-capex.md` with 8 candidates across 5 sub-themes (NVDA, AMD, AVGO, TSM, AMAT, LRCX, AMKR, ENTG); includes 2nd/3rd-order beneficiaries (AVGO, AMKR, ENTG); real citations from Jan-Apr 2026
+- Updated `K2Bi-Vault/wiki/macro-themes/index.md` with theme table row
+- Added Ship 1 Safety Disclaimer section post-review (unvalidated LLM output warning)
+
+**Review trail and architect dispositions:**
+
+| Round | Reviewer | Verdict | Findings |
+|-------|----------|---------|----------|
+| R1 | Codex | UNREACHABLE | EISDIR on logs/ + both_failed (exit 2) |
+| R2 | MiniMax M2.7 (forced via K2B_LLM_PROVIDER=minimax per spec) | NEEDS-ATTENTION | 8 findings (3 CRITICAL, 3 HIGH, 2 MEDIUM) |
+
+- **R2 #1 (CRITICAL) Unvalidated citations:** ACCEPTED LIMITATION. HTTP-HEAD citation validation is explicitly Ship 2 scope. Safety disclaimer added to SKILL.md warning Keith that citations are UNVALIDATED LLM output.
+- **R2 #2 (CRITICAL) Unverified ticker symbols:** ACCEPTED LIMITATION. Canonical ticker registry + existence check is Ship 2 scope. Safety disclaimer added.
+- **R2 #3 (CRITICAL) Atomic write spec unimplemented:** ACCEPTED LIMITATION. Ship 1 is prompt-engineering; atomic write was implemented in the regression-test script, but the skill itself does not ship Python code. Spec documents the pattern for downstream implementers.
+- **R2 #4 (HIGH) 2nd/3rd-order enforcement:** ACCEPTED LIMITATION. Prompt-level request only; programmatic enforcement deferred to Ship 2.
+- **R2 #5 (HIGH) attention-score stub hazard:** ACCEPTED LIMITATION. Stub explicitly marked `<stub for Ship 3>`; will be replaced by Ship 3 scheduled refresh logic.
+- **R2 #6 (HIGH) Index update rollback:** DOCUMENTED. Two-phase write with orphan cleanup is Ship 2 scope. Current manual MVP accepts orphan risk.
+- **R2 #7 (MEDIUM) priced-in-warnings unvalidated:** ACCEPTED LIMITATION. 90-day return lookup is Ship 2 scope. Field marked as LLM self-assessment only in safety disclaimer.
+- **R2 #8 (MEDIUM) Slug derivation collision:** DOCUMENTED. First-6-words + suffix is per spec. Hash-based slug upgrade deferred to Ship 2 if collision frequency surfaces during burn-in.
+
+**Cross-model review path:** Codex primary attempted twice (both_failed) -> per job spec, forced MiniMax M2.7 explicitly via `K2B_LLM_PROVIDER=minimax` through `scripts/minimax-review.sh`; no silent fallback to Kimi-backed reviewer (self-review forbidden).
+
+**Regression test:**
+- Narrative: "AI compute demand drives semiconductor capex cycle"
+- Output: 5 sub-themes, 8 candidates, includes 2nd/3rd-order plays (AVGO custom ASICs, AMKR advanced packaging, ENTG specialty materials)
+- Citations: real URLs from Jan-Apr 2026 (GuruFocus, Seeking Alpha, Yahoo Finance, Motley Fool, AInvest)
+- Priced-in warnings: NVDA, AMD flagged as may already be priced in
+
+**MVP gate status:**
+- Criteria 1-5: PASS (verifiable in this run)
+- Criterion 6 (Keith promotes >=1 candidate within one week): PENDING OPERATOR GATE. Keith flips `feature_invest-narrative-mvp` status manually upon promotion.
+
+**Follow-ups:**
+- Ship 2: Python validators (ticker-exists, market-cap, liquidity, priced-in), canonical registry, citation HTTP-HEAD, two-call decomposition, `--promote <symbol>` writer
+- Ship 3: News-feed integration, attention-score auto-population, scheduled refresh
+- `/sync` to VPS deferred until next routine deploy cycle
+
 ## 2026-04-25 -- Phase 3.9 Stage 2 SHIPPED -- skill+script retargeting Mac Mini -> Hostinger VPS + Kimi-backed reviewer prose consistency + finding #2 backport (${VAR:-} -> ${VAR-} cron-env trap fix); R2 P1 #1 fixed (AGENTS.md back to excludes), R2 P1 #2 defended via documentation (false positive, verified via executable bash test), R2 #3 escalated by R3 to P1 -> Path 3 hardening applied (restart failure now FATAL to deploy, sentinel does not advance on failed restart); R2 P2 #4 + #5 documented as design decisions
 
 **Commit:** `a6cc226` Phase 3.9 Stage 2 SHIPPED -- skill+script retargeting Mac Mini -> Hostinger VPS + Kimi-backed reviewer prose consistency + finding #2 backport (${VAR:-} -> ${VAR-} cron-env trap fix); R2 P1 #1 fixed (AGENTS.md back to excludes), R2 P1 #2 defended via documentation (false positive, verified via executable bash test), R2 #3 escalated by R3 to P1 -> Path 3 hardening applied (restart failure now FATAL to deploy, sentinel does not advance on failed restart); R2 P2 #4 + #5 documented as design decisions
