@@ -6,6 +6,7 @@ Codex's review-output schema. Touches nothing in /ship or the codex plugin.
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -417,13 +418,21 @@ def extract_json_object(text: str) -> dict | None:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
-    # Strip common code-fence wrappers
-    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
+    # Kimi wraps JSON in ```json ... ``` fences. Use json.JSONDecoder.raw_decode
+    # instead of a regex brace-match: raw_decode scans linearly with a real
+    # JSON parser, so it cannot catastrophic-backtrack on pathological input
+    # (the K2B 2026-04-25 swap flagged the prior greedy regex as a hang risk).
+    fence = re.search(r"```(?:json)?\s*", text)
     if fence:
-        try:
-            return json.loads(fence.group(1))
-        except json.JSONDecodeError:
-            pass
+        rest = text[fence.end():]
+        brace = rest.find("{")
+        if brace != -1:
+            try:
+                obj, _ = json.JSONDecoder().raw_decode(rest[brace:])
+                if isinstance(obj, dict):
+                    return obj
+            except json.JSONDecodeError:
+                pass
     # Greedy first-{ to last-} fallback
     start = text.find("{")
     end = text.rfind("}")
@@ -450,7 +459,7 @@ def render_markdown(parsed: dict, model: str, usage: dict) -> str:
 
     badge = "APPROVE" if verdict == "approve" else "NEEDS-ATTENTION"
     lines: list[str] = []
-    lines.append(f"# MiniMax {model} review -- {badge}")
+    lines.append(f"# {model} review -- {badge}")
     lines.append("")
     lines.append(f"**Summary:** {summary}")
     lines.append("")
@@ -558,10 +567,19 @@ def main() -> int:
         default=None,
         help="Comma-separated list of paths (required when --scope diff or files)",
     )
+    # Default model tracks the active provider: kimi-for-coding when
+    # K2B_LLM_PROVIDER=kimi (current default since the K2B 2026-04-25 swap),
+    # MiniMax-M2.7 on MiniMax rollback. Callers can still pass --model.
+    _default_model = os.environ.get(
+        "K2B_LLM_MODEL",
+        "kimi-for-coding"
+        if os.environ.get("K2B_LLM_PROVIDER", "kimi") == "kimi"
+        else "MiniMax-M2.7",
+    )
     parser.add_argument(
         "--model",
-        default="MiniMax-M2.7",
-        help="MiniMax model id (default MiniMax-M2.7)",
+        default=_default_model,
+        help=f"Model id (default {_default_model})",
     )
     parser.add_argument(
         "--focus",
