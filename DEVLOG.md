@@ -1,3 +1,37 @@
+## 2026-04-26 -- per-repo post-build-hook convention + K2Bi planning propagation bootstrap
+
+**Commit:** `b67f9aa` feat(ship): per-repo post-build-hook convention + K2Bi planning propagation bootstrap
+
+**What shipped:**
+- `.kimi/post-build-hook.sh`: 4-line shell wrapper, executable, tracked via `.gitignore` `.kimi/*` glob plus `!.kimi/post-build-hook.sh` exception. Runs `python3 -m scripts.lib.propagate_planning_status` from repo root.
+- `scripts/lib/propagate_planning_status.py`: scan-based propagation engine. Walks `K2Bi-Vault/wiki/planning/**/*.md`, finds `<!-- AUTO: <tag> -->` ... `<!-- END AUTO -->` fences via `re.IGNORECASE` non-greedy `re.DOTALL` regex, dispatches to handlers, writes via `atomic_write_bytes` (tempfile + fsync + os.replace from `strategy_frontmatter`). Two-pass design: read + compute all files in pass 1, write changed files in pass 2. Handler exceptions abort before any disk write. Format-preserving wrap so single-line table-cell fences stay inline; block-style fences keep their newline padding.
+- `scripts/lib/propagate_handlers.py`: 3 pure handlers — `phase3-status` (one-line summary derived from Phase 3 table; denominator dynamically derived from `len(main_rows)`), `bundle5-status` (one-paragraph status with SHAs from milestones.md; numeric m2.X sort for stable display order), `next-concrete-action` (Phase 3 NEXT row → one sentence; falls back to m2.22 review then first pending Phase 3 row). For m2.9, only SHAs after the second `SHIPPED` marker are kept so the rendered (z.4)+(bb) follow-up SHAs replace the original Bundle 5a base.
+- `tests/test_propagate_planning_status.py`: 21 tests covering handler unit outputs, end-to-end fence regeneration per tag, idempotency (zero-diff on second run), atomic-write failure leaves original unchanged, unknown-tag skip with WARNING, handler-exception non-zero exit, multi-fence single-file, scan-finds-newly-added-file, end-to-end milestones.md modification flows through to mirror docs, mixed-case tag dispatch, transactional-abort on handler exception, vault-root fallback WARNING, dynamic denominator growth on row addition.
+- `tests/fixtures/propagate/milestones_synthetic.md` + `milestones_post_m213_ship.md`: synthetic fixtures for handler unit tests + manual sanity-check shape.
+- `.claude/skills/invest-ship/SKILL.md`: new step 4a "Per-repo post-build hook" inserted before commit-creation step. The hook runs after build pass conditions are green but before staging; non-zero exit STOPs the ship without proceeding to commit.
+- `scripts/deploy-config.yml`: `.kimi` added to excludes so rsync deploy never touches the local-only kimi-handoff workspace.
+
+K2Bi-Vault planning mirror docs annotated with 14 AUTO fences across 5 files (milestones.md, roadmap.md, index.md, upcoming-sessions.md, phase-2-bundles.md) — Last-updated header status appendix, Phase 2 row Lane column, Phase 3 row Lane + Exit columns, Final-sequence paragraph, Post-3.9 parallel-ships paragraph, Resume Card Bundle 5 + next-concrete-action sub-paragraphs, Bundle 5 summary table row, Bundle 5a + remainder rows in reordering table.
+
+**Self-validation:** `/invest-ship` step 4a (newly added by this ship) executed during this same ship; ran `.kimi/post-build-hook.sh` against the just-annotated planning docs; two consecutive zero-diff runs verified. The bootstrap ship validates itself by running its own propagation cleanly.
+
+**Codex review:** Codex EISDIR'd on `.kimi` as expected; forced fallback to MiniMax-M2.7 via `K2B_LLM_PROVIDER=minimax` per architect spec (NEVER silent fall-back to Kimi). Three review rounds:
+- R1 NEEDS-ATTENTION (2 HIGH + 1 MEDIUM): FENCE_RE was case-sensitive (silently dropped uppercase tags); propagate() had no transactional rollback (split-brain risk on partial-batch failure); `_resolve_vault_root` silently used hardcoded fallback. ALL fixed inline: FENCE_RE → `[a-zA-Z0-9_-]+` with lowercase canonicalization at dispatch + new mixed-case test; propagate() refactored to two-pass (read+compute all, write all) so handler exceptions abort before any write + new transactional-abort test; `_resolve_vault_root` logs WARNING on hardcoded fallback + new test.
+- R2 NEEDS-ATTENTION (1 MEDIUM): hand-maintained `PHASE_3_MAIN_TOTAL=11` and `BUNDLE_5_DISPLAY_ORDER` constants would silently produce wrong output as milestones.md evolves. Fixed inline: denominator now `len(main_rows)`; Bundle 5 ordering derives from numeric m2.X sort key + 2 dynamic-count regression tests.
+- R3 APPROVE no findings.
+
+Stop rule satisfied: P1=0 + P2 isolated.
+
+**Feature status change:** none (`--no-feature` infrastructure ship).
+
+**Follow-ups:** PART A is paste-ready text in the architect's ship report — operator applies two before/after edits to `~/.claude/skills/kimi-handoff/SKILL.md` manually on MacBook + Mac Mini. The convention takes effect for FUTURE kimi-handoff jobs once PART A is applied; this ship's K2Bi side already invokes the post-build-hook automatically via the `/invest-ship` step 4a addition.
+
+**Key decisions (if divergent from claude.ai project specs):**
+- Architect spec example "8 of 11 main milestones" hand-counted excluded both 3.6.5 NEW slot and Q42 special insert. R2 review surfaced the constant as a maintenance hazard; switched to `len(main_rows)` (which excludes only Q-prefixed special inserts), giving "9 of 12" today. Documented in handler.
+- `.kimi/post-build-hook.sh` is git-tracked via `.gitignore` exception so the convention propagates with fresh clones. Architect's spec did not specify tracking; chose to track for portability and to make the convention self-documenting.
+
+---
+
 ## 2026-04-26 -- invest-screen Stage-2 enricher SHIPPED -- Phase 3.7 m2.13
 
 **Commit:** `1bc85c3` feat: invest-screen Stage-2 enricher (m2.13)
