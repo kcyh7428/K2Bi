@@ -1366,3 +1366,22 @@ feat(risk): belt-and-suspenders kill.flag alias alongside canonical `.killed`.
 - kimi-handoff route chosen for Ship 2 (same as Ship 1) because the spec was concrete and the work was mechanical Python plumbing. Cross-model review discipline enforced: Codex primary, 14 rounds, no silent Kimi self-review.
 - Dependency inversion: Ship 2 now OWNS the watchlist schema and writes Stage-1 fields. m2.13 invest-screen ships LATER as the consumer/enricher. This was the Option 2 re-scope from the 2026-04-25 architect planning sweep.
 - Stage-2 fields (`quick_score`, `quick_score_breakdown`, `sub_factors`, `band_definition_version`) are explicitly excluded from `--promote` output per spec boundary. m2.13 owns them.
+
+
+## 2026-04-26 -- m2.20 tier frontmatter audit SHIPPED -- 24 SKILL.md frontmatter blocks gain canonical tier per skills-design.md table
+
+**Commit:** `1a677c6` feat(skills): m2.20 add tier frontmatter field to all 24 K2Bi SKILL.md per skills-design.md
+
+**What shipped:** Mechanical audit adding `tier:` YAML frontmatter to all 24 K2Bi SKILL.md files under `.claude/skills/`. Canonical tier values sourced from `~/Projects/K2Bi-Vault/wiki/planning/skills-design.md` Tier Assignment + Routines-Ready Status tables. Ten files already had a `tier:` field with inconsistent casing (Title Case: `Trader`, `Analyst`, `Portfolio Manager`); all were normalized to lowercase kebab-case (`trader`, `analyst`, `portfolio-manager`, `utility`). Fourteen files lacked the field entirely and received it after the `description:` line. One file (`invest-research`) received a spec-authorized body comment (`<!-- Tier note: hybrid skill; schedulable subset migrates to Analyst in Phase 6 -->`) immediately after the frontmatter closing `---`, because the design doc classifies it as Hybrid (Portfolio Manager interactive + Analyst scheduled).
+
+**Codex review:** R1 surfaced 2 findings (1 high + 1 medium), both architect-overruled. High: `utility` tier flagged as undocumented enum expansion; overruled because the canonical source is `skills-design.md` (already documents the 4-tier model including Utility), not the stale `proposals/2026-04-18_phase2-mvp-scaffold-revision.md` Codex grounded on. Medium: `invest-research` body comment flagged as out-of-scope body mutation; overruled because the comment is explicitly mandated by the job spec's Constraints section as the single allowed body edit.
+
+**Feature status change:** m2.20 Bundle 5 milestone row updated in `~/Projects/K2Bi-Vault/wiki/planning/milestones.md` to `SHIPPED Bundle 5 2026-04-26 at K2Bi 1a677c6`.
+
+**Follow-ups:**
+- Phase 6 Routines migration audit now unblocked: every SKILL.md carries a machine-readable tier for filtering Analyst-tier migration candidates vs permanent Trader/Portfolio Manager/Utility skills.
+- No runtime code consumes `tier:` yet; future consumers (pm2 ecosystem generator, Routines gate, skill-usage tracker filters) can rely on the field being present.
+
+**Key decisions:**
+- One-pass mechanical bucket discipline applied: single Codex pass, findings overruled inline by architect ruling rather than fix-and-re-review. This matches the K2B-architect pre-declaration that m2.20 is NOT capital-path.
+- `utility` treated as a 4th tier value (extending the 3-tier hedge-fund role model) for shared-tool infrastructure skills that have no migration target and run wherever their caller runs.
