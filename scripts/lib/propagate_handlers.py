@@ -22,13 +22,13 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
-# Hardcoded reference for the m2.22 Codex full-stack review slot. The
+# Final-sequence label for the m2.22 Codex full-stack review slot. The
 # review row sits in the Phase 2 Bundle 5 table (not Phase 3), but the
-# final-sequence narration places it as Phase 3.7.5 between 3.7 and
-# 3.8. Until m2.22 itself ships (when it will appear in shipped), the
-# handler emits this as an explicit pending pointer.
+# architect's final sequence narration places it as Phase 3.7.5 between
+# 3.7 and 3.8. The actual gate phrasing is computed dynamically by
+# `_m22_gate_phrase` so the rendered status always reflects the current
+# state of m2.13 (the prerequisite) and m2.22 (the slot itself).
 M2_22_SLOT_LABEL = "3.7.5 m2.22"
-M2_22_GATE_DESCRIPTION = "gates on m2.13"
 
 
 def _read_text(path: Path) -> str:
@@ -318,12 +318,45 @@ def render_phase3_status(milestones_md_path: Path) -> str:
         else:
             parts.append(f"{nl['label']} \U0001f7e1 NEXT")
 
-    parts.append(f"{M2_22_SLOT_LABEL} ⏳ {M2_22_GATE_DESCRIPTION}")
+    m22_phrase = _m22_gate_phrase(text)
+    if m22_phrase is not None:
+        parts.append(f"{M2_22_SLOT_LABEL} ⏳ {m22_phrase}")
 
     if pending_main:
         parts.append(f"{' + '.join(pending_main)} pending")
 
     return "; ".join(parts)
+
+
+def _m22_gate_phrase(text: str) -> str | None:
+    """Derive the m2.22 gate phrasing from milestones.md state.
+
+    Returns:
+        - None if m2.22 itself has shipped: callers should drop the
+          m2.22 mention from their output entirely.
+        - "READY (m2.13 ✅; awaits architect greenlight)" if m2.13 has
+          shipped but m2.22 has not: the gate has cleared but the
+          single-pass full-stack review is still architect-coordinated,
+          so the slot is not auto-runnable.
+        - "gates on m2.13" if m2.13 has not yet shipped: the original
+          dependency holds; m2.22 cannot start until m2.13 closes.
+
+    Replaces the previous M2_22_GATE_DESCRIPTION constant so derived
+    prose reflects current source-of-truth state rather than a frozen
+    snapshot. m2.13's status is read from the Phase 3 table (the row
+    whose verification column references `m2.13`); m2.22's status is
+    read from the Bundle 5 table directly.
+    """
+    bundle5 = _bundle5_rows(text)
+    if "m2.22" in bundle5 and bundle5["m2.22"]["status"] == "shipped":
+        return None
+
+    rows = _phase3_rows(text)
+    m2_13_row = next((r for r in rows if r.get("m2_id") == "m2.13"), None)
+    if m2_13_row and m2_13_row["status"] == "shipped":
+        return "READY (m2.13 ✅; awaits architect greenlight)"
+
+    return "gates on m2.13"
 
 
 def _bundle5_sort_key(label: str) -> tuple:
@@ -383,9 +416,14 @@ def render_bundle5_status(milestones_md_path: Path) -> str:
             shipped_parts.append(f"{mid} {sha_chunk}")
 
     pending_parts: list[str] = []
+    m22_phrase = _m22_gate_phrase(text)
     for mid in pending_ids:
         if mid == "m2.22":
-            pending_parts.append(f"{mid} ⏳ LAST, gates on m2.13")
+            # m2.22 in pending_ids means it has not shipped yet; the
+            # phrase is "gates on m2.13" pre-m2.13-ship and shifts to
+            # "READY (m2.13 ✅; awaits architect greenlight)" after.
+            suffix = m22_phrase if m22_phrase is not None else "LAST"
+            pending_parts.append(f"{mid} ⏳ LAST, {suffix}")
         else:
             pending_parts.append(f"{mid} ⏳ pending")
 
@@ -434,9 +472,10 @@ def render_next_concrete_action(milestones_md_path: Path) -> str:
     # No 🟡 NEXT row in Phase 3. Fall back to Bundle 5 m2.22 if pending.
     bundle5 = _bundle5_rows(text)
     if "m2.22" in bundle5 and bundle5["m2.22"]["status"] != "shipped":
+        gate = _m22_gate_phrase(text) or "ready"
         return (
             f"Phase {M2_22_SLOT_LABEL} Codex full-stack review "
-            f"({M2_22_GATE_DESCRIPTION}; covers Q42 + Ship 1 + Ship 2 + "
+            f"({gate}; covers Q42 + Ship 1 + Ship 2 + "
             f"Bundle 5 + m2.13 in one pass)"
         )
 

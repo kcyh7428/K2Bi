@@ -410,6 +410,60 @@ class DynamicCountTests(unittest.TestCase):
         self.assertIn("of 5 SHIPPED", out)
 
 
+class M22GatePhraseTests(unittest.TestCase):
+    """Dynamic m2.22 gate phrasing reflects m2.13 + m2.22 state."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp_path = Path(self._tmp.name)
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def _vault_with(self, fixture_name: str) -> Path:
+        return _make_synthetic_vault(self.tmp_path, FIXTURES / fixture_name)
+
+    def test_pre_m213_ship_emits_gates_on_m213(self) -> None:
+        vault = self._vault_with("milestones_synthetic.md")
+        m = vault / "wiki" / "planning" / "milestones.md"
+        self.assertIn("gates on m2.13", render_phase3_status(m))
+        self.assertIn("gates on m2.13", render_bundle5_status(m))
+
+    def test_post_m213_ship_emits_ready_phrasing(self) -> None:
+        vault = self._vault_with("milestones_post_m213_ship.md")
+        m = vault / "wiki" / "planning" / "milestones.md"
+        out_p3 = render_phase3_status(m)
+        out_b5 = render_bundle5_status(m)
+        self.assertIn("READY (m2.13 ✅; awaits architect greenlight)", out_p3)
+        self.assertIn("READY (m2.13 ✅; awaits architect greenlight)", out_b5)
+        # Old phrasing must NOT survive when m2.13 has shipped.
+        self.assertNotIn("⏳ gates on m2.13", out_p3)
+
+    def test_m222_shipped_drops_slot_from_phase3_status(self) -> None:
+        # Take the post-m2.13-ship fixture and additionally flip m2.22
+        # to shipped. Expect the 3.7.5 m2.22 slot to disappear from
+        # phase3-status entirely (the dynamic helper returns None).
+        vault = self._vault_with("milestones_post_m213_ship.md")
+        m = vault / "wiki" / "planning" / "milestones.md"
+        text = m.read_text(encoding="utf-8")
+        text = text.replace(
+            "| m2.22 | LAST Bundle 5 item; gates on m2.13. | "
+            "Codex full-stack review | runs after m2.13 |",
+            "| m2.22 | ✅ SHIPPED 2026-04-27 at K2Bi `cafef00`. | "
+            "Codex full-stack review | runs after m2.13 |",
+        )
+        m.write_text(text, encoding="utf-8")
+
+        out_p3 = render_phase3_status(m)
+        self.assertNotIn("3.7.5 m2.22", out_p3)
+        self.assertNotIn("⏳", out_p3)
+
+        out_b5 = render_bundle5_status(m)
+        # m2.22 is now shipped; it appears in shipped_ids, not pending.
+        self.assertIn("4 of 4 SHIPPED", out_b5)
+        self.assertNotIn("⏳ LAST", out_b5)
+
+
 class VaultRootResolutionTests(unittest.TestCase):
     def test_fallback_path_logs_warning(self) -> None:
         # Force the env override + git lookup to fail by patching out
