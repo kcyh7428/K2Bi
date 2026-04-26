@@ -1,3 +1,38 @@
+## 2026-04-26 -- m2.22 Codex full-stack review SHIPPED -- closes Bundle 5 (5/5), unblocks Phase 3.10 burn-in window
+
+**Commits:** `9b0f0b3` fix(m2.22-review): F1-F4 + `3c98417` fix(m2.22-review-r2): N1+N2 + `dbee41f` fix(m2.22-review-r3): N3 + `317cdba` fix(m2.22-review-r4): N4
+
+**Range covered:** 20 commits in `295d898..origin/main` (HEAD ff7aa8a at fire) -- Q42 + Q42 step-4 validation + Ship 1 + Ship 2 + m2.20 + m2.19 + m2.9 (z.4)+(bb) + m2.13 + post-build-hook bootstrap + review.sh env-prefix note + K2Bi-Opus #2 propagate dynamic-helper follow-up.
+
+**Findings + dispositions (4 review rounds, 8 findings, all P1 fixed inline):**
+
+| Round | Finding | Severity | Fix commit |
+|-------|---------|----------|------------|
+| R1    | F1: invest_screen --enrich silently canonized corrupted Stage-1 (key-presence-only validation) | high (P1) | 9b0f0b3 -- _validate_stage1_values rejects null/empty/wrong-type/out-of-range |
+| R1    | F2: promote_to_watchlist treated existing promoted file as idempotent on (symbol, status) only | high (P1) | 9b0f0b3 -- compares all 6 Ship-2 semantic fields byte-for-byte |
+| R1    | F3: promote_to_watchlist had no rollback on partial-write failure | medium (P2 lifted) | 9b0f0b3 -- snapshot+restore rollback (later replaced by N2) |
+| R1    | F4: shared watchlist-index writer racy across Ship 2 + m2.13 (TOCTOU re-eval) | medium → P1 lifted | 9b0f0b3 -- consolidated `scripts/lib/watchlist_index.py` with fcntl.flock |
+| R2    | N1: F2 conflict check only fired on existing file; concurrent same-symbol promotes raced | high (P1) | 3c98417 -- `symbol_lock(vault, symbol)` wraps full transaction |
+| R2    | N2: F3 snapshot-restore rollback released lock; clobbered concurrent writer rows | high (P1) | 3c98417 -- `remove_watchlist_index_row` compensating action under index lock |
+| R3    | N3: rollback compensators ran independently; partial failure left orphaned state | high (P1) | dbee41f -- unlink-first ordering + self-heal hint, retry converges via idempotent guard |
+| R4    | N4: symbol_lock only on Ship 2; invest_screen.enrich + manual_promote still raced same symbol | high (P1) | 317cdba -- wrapped enrich + manual_promote bodies in symbol_lock |
+
+**Reviewer:** Codex (codex-companion adversarial-review --background --base 295d898 --scope branch for R1; --base ff7aa8a for R2; --base 3c98417 for R3 via codex-companion; --files via scripts/review.sh after the review-guard hook landed mid-session and blocked direct codex-companion calls).
+
+**Tests added:** 13 across test_invest_screen.py + test_invest_narrative_pipeline.py + test_watchlist_index.py. Affected subtree: 105 passed.
+
+**Pre-existing failures (out-of-scope for m2.22):** 8 engine tests in test_engine_main.py + test_engine_once_barrier.py confirmed failing on origin/main baseline before m2.22 fixes (verified via worktree at origin/main HEAD ff7aa8a). NOT regressions from this review window. Tracked as P3 follow-up for Phase 3.10 prep.
+
+**P3 follow-up surfaced during m2.22 (out of scope for this review, but flagging for separate triage):** Codex re-reviews repeatedly flagged `scripts/lib/minimax_review.py:412-435` -- the new malformed-JSON fallback can turn a broken Kimi review into a successful zero-finding review, suppressing the wrapper fallback chain. This is parallel-session work (not in m2.22 commit range), but is a real review-pipeline finding. Architect should triage as a separate follow-up commit to scripts/lib/minimax_review.py.
+
+**Bundle 5 status:** ✅ COMPLETE (m2.9 + m2.19 + m2.20 + m2.22 all SHIPPED). Phase 3.10 unattended burn-in is now structurally unblocked from a review-gate perspective; remaining gates are operator-side (Phase 5 full 6-criteria replay on VPS, Phase 3.8 first domain thesis completion).
+
+**Codex review:** N/A for this DEVLOG-only entry (the 4 fix commits were each individually reviewed; this commit just records the closure).
+
+**Feature status change:** [[feature_invest-narrative-mvp]] hardened against concurrent same-symbol promote race; [[feature_invest-screen-mvp]] hardened against corrupted Stage-1 input. New shared module `scripts/lib/watchlist_index.py` is canonical for any future writer of `wiki/watchlist/index.md`.
+
+---
+
 ## 2026-04-26 -- invest-regime m2.14 MVP
 
 **Commit:** TBD feat(skills): m2.14 invest-regime MVP — manual classification + atomic write to wiki/regimes/current.md
