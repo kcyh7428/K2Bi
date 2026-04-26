@@ -7,7 +7,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from scripts.lib.watchlist_index import _index_lock, update_watchlist_index
+from scripts.lib.watchlist_index import (
+    _index_lock,
+    remove_watchlist_index_row,
+    symbol_lock,
+    update_watchlist_index,
+)
 
 
 class UpdateWatchlistIndexBasicTests(unittest.TestCase):
@@ -115,6 +120,125 @@ class ConcurrentWritersDoNotDropRowsTests(unittest.TestCase):
             self.assertIn(
                 "| [[LRCX]]", content, "LRCX row was dropped by the race"
             )
+
+
+class RemoveWatchlistIndexRowTests(unittest.TestCase):
+    """m2.22 N2: compensating-removal rollback semantics."""
+
+    def test_removes_only_target_symbol(self):
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            update_watchlist_index(td_path, "NVDA", "2026-04-26", "promoted")
+            update_watchlist_index(td_path, "LRCX", "2026-04-26", "screened")
+            remove_watchlist_index_row(td_path, "LRCX")
+            content = (td_path / "wiki" / "watchlist" / "index.md").read_text()
+            self.assertIn("| [[NVDA]]", content)
+            self.assertNotIn("| [[LRCX]]", content)
+
+    def test_noop_on_missing_index(self):
+        with tempfile.TemporaryDirectory() as td:
+            # Should not raise even though no index file exists.
+            remove_watchlist_index_row(Path(td), "NVDA")
+
+    def test_noop_on_missing_symbol(self):
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            update_watchlist_index(td_path, "NVDA", "2026-04-26", "promoted")
+            content_before = (td_path / "wiki" / "watchlist" / "index.md").read_text()
+            remove_watchlist_index_row(td_path, "TSLA")
+            content_after = (td_path / "wiki" / "watchlist" / "index.md").read_text()
+            self.assertEqual(content_before, content_after)
+
+
+class SymbolLockTests(unittest.TestCase):
+    """m2.22 N1: per-symbol promotion lock."""
+
+    def test_creates_per_symbol_sentinel(self):
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            with symbol_lock(td_path, "LRCX"):
+                pass
+            lock_path = td_path / "wiki" / "watchlist" / ".LRCX.lock"
+            self.assertTrue(lock_path.exists())
+
+    def test_different_symbols_use_different_sentinels(self):
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            with symbol_lock(td_path, "LRCX"):
+                pass
+            with symbol_lock(td_path, "NVDA"):
+                pass
+            self.assertTrue((td_path / "wiki" / "watchlist" / ".LRCX.lock").exists())
+            self.assertTrue((td_path / "wiki" / "watchlist" / ".NVDA.lock").exists())
+
+    def test_lock_released_on_exception(self):
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            try:
+                with symbol_lock(td_path, "LRCX"):
+                    raise RuntimeError("simulated failure")
+            except RuntimeError:
+                pass
+            # Re-acquire must succeed (lock was released).
+            with symbol_lock(td_path, "LRCX"):
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Concurrency proof for compensating-removal rollback (m2.22 N2): a
+# rollback that re-reads under the index lock and removes only the
+# target row must NOT clobber another writer's row that landed
+# in between.
+# ---------------------------------------------------------------------------
+
+
+def _writer_then_remover(vault_path_str: str, write_symbol: str, remove_symbol: str):
+    """Worker target: write one symbol then remove a different one
+    by compensating action -- mimics a rollback racing with another
+    writer."""
+    from scripts.lib.watchlist_index import (
+        remove_watchlist_index_row as rm,
+        update_watchlist_index as wr,
+    )
+
+    wr(Path(vault_path_str), write_symbol, "2026-04-26", "promoted")
+    rm(Path(vault_path_str), remove_symbol)
+
+
+class CompensatingRemovalSurvivesConcurrentWriterTests(unittest.TestCase):
+    def test_rollback_does_not_clobber_concurrent_row(self):
+        """A snapshot-and-restore rollback would lose NVDA. The
+        compensating-removal rollback must preserve it."""
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            # Pre-stage one row to simulate "in-flight" promote that
+            # already landed an index update.
+            update_watchlist_index(td_path, "LRCX", "2026-04-26", "promoted")
+
+            ctx = mp.get_context("spawn")
+            # Process 1 writes NVDA (the "concurrent writer").
+            p1 = ctx.Process(
+                target=_writer_process,
+                args=(str(td_path), "NVDA", "2026-04-26", "promoted"),
+            )
+            # Process 2 simulates the rolled-back promote: it removes
+            # LRCX (its own previously-written row) by compensating
+            # action.
+            p2 = ctx.Process(
+                target=_writer_then_remover,
+                args=(str(td_path), "TSLA", "LRCX"),
+            )
+            p1.start()
+            p2.start()
+            p1.join(timeout=30)
+            p2.join(timeout=30)
+            self.assertEqual(p1.exitcode, 0)
+            self.assertEqual(p2.exitcode, 0)
+
+            content = (td_path / "wiki" / "watchlist" / "index.md").read_text()
+            self.assertIn("| [[NVDA]]", content, "Concurrent writer's row must survive")
+            self.assertIn("| [[TSLA]]", content, "Process-2 write must survive")
+            self.assertNotIn("| [[LRCX]]", content, "Compensating removal must succeed")
 
 
 if __name__ == "__main__":

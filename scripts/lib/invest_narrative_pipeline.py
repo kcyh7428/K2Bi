@@ -33,7 +33,11 @@ from scripts.lib.invest_narrative_validators import (
 )
 from scripts.lib.invest_ship_strategy import resolve_vault_root
 from scripts.lib.strategy_frontmatter import atomic_write_bytes, parse as parse_frontmatter
-from scripts.lib.watchlist_index import update_watchlist_index
+from scripts.lib.watchlist_index import (
+    remove_watchlist_index_row,
+    symbol_lock,
+    update_watchlist_index,
+)
 
 # ---------------------------------------------------------------------------
 # Slug derivation (matches Ship 1 SKILL.md exactly)
@@ -631,102 +635,107 @@ def promote_to_watchlist(
     watchlist_dir = vault / "wiki" / "watchlist"
     watchlist_path = watchlist_dir / f"{symbol}.md"
 
-    # Idempotency: existing entry must match Ship-2-owned semantic fields
-    # byte-for-byte. A different theme promoting the same symbol with
-    # different reasoning is a real conflict, not idempotent state.
-    if watchlist_path.exists():
-        existing_bytes = watchlist_path.read_bytes()
-        existing_fm = parse_frontmatter(existing_bytes)
-        existing_status = existing_fm.get("status")
-        if existing_status != "promoted":
-            raise ValueError(
-                f"Watchlist entry {symbol} already exists with status "
-                f"'{existing_status}'. Refusing to overwrite."
-            )
-        ship2_fields = (
-            "symbol",
-            "narrative_provenance",
-            "reasoning_chain",
-            "citation_url",
-            "order_of_beneficiary",
-            "ark_6_metric_initial_scores",
-        )
-        mismatches: list[str] = []
-        for field in ship2_fields:
-            existing_val = existing_fm.get(field)
-            new_val = frontmatter.get(field)
-            if existing_val != new_val:
-                mismatches.append(
-                    f"{field}: existing={existing_val!r} new={new_val!r}"
+    # Per-symbol lock makes the existence check + conflict detection +
+    # write atomic so two concurrent promotions of the same symbol from
+    # different theme files cannot both observe the file as absent and
+    # race the write (m2.22 N1 fix).
+    with symbol_lock(vault, symbol):
+        # Idempotency: existing entry must match Ship-2-owned semantic
+        # fields byte-for-byte. A different theme promoting the same
+        # symbol with different reasoning is a real conflict, not
+        # idempotent state.
+        if watchlist_path.exists():
+            existing_bytes = watchlist_path.read_bytes()
+            existing_fm = parse_frontmatter(existing_bytes)
+            existing_status = existing_fm.get("status")
+            if existing_status != "promoted":
+                raise ValueError(
+                    f"Watchlist entry {symbol} already exists with status "
+                    f"'{existing_status}'. Refusing to overwrite."
                 )
-        if mismatches:
-            raise ValueError(
-                f"Conflict: watchlist entry {symbol} already promoted with "
-                f"different Ship-2 state. Mismatched fields: " + "; ".join(mismatches)
-                + ". Resolve manually before re-promoting."
+            ship2_fields = (
+                "symbol",
+                "narrative_provenance",
+                "reasoning_chain",
+                "citation_url",
+                "order_of_beneficiary",
+                "ark_6_metric_initial_scores",
             )
-        _update_watchlist_index(vault, symbol, today, "promoted")
-        _append_promotion_to_theme(theme_file_path, symbol, today)
-        print(f"{symbol} is already promoted to watchlist.")
-        return watchlist_path
+            mismatches: list[str] = []
+            for field in ship2_fields:
+                existing_val = existing_fm.get(field)
+                new_val = frontmatter.get(field)
+                if existing_val != new_val:
+                    mismatches.append(
+                        f"{field}: existing={existing_val!r} new={new_val!r}"
+                    )
+            if mismatches:
+                raise ValueError(
+                    f"Conflict: watchlist entry {symbol} already promoted with "
+                    f"different Ship-2 state. Mismatched fields: "
+                    + "; ".join(mismatches)
+                    + ". Resolve manually before re-promoting."
+                )
+            _update_watchlist_index(vault, symbol, today, "promoted")
+            _append_promotion_to_theme(theme_file_path, symbol, today)
+            print(f"{symbol} is already promoted to watchlist.")
+            return watchlist_path
 
-    body_lines = [
-        f"# Watchlist: {symbol}",
-        "",
-        f"Promoted from {provenance} on {today}.",
-        "",
-        f"**Reasoning chain:** {row['reasoning_chain']}",
-        "",
-        f"**Citation:** [{row['citation_url']}]({row['citation_url']})",
-        "",
-        "## Linked notes",
-        "",
-        f"- {provenance}",
-        "- [[index]]",
-        "",
-    ]
+        body_lines = [
+            f"# Watchlist: {symbol}",
+            "",
+            f"Promoted from {provenance} on {today}.",
+            "",
+            f"**Reasoning chain:** {row['reasoning_chain']}",
+            "",
+            f"**Citation:** [{row['citation_url']}]({row['citation_url']})",
+            "",
+            "## Linked notes",
+            "",
+            f"- {provenance}",
+            "- [[index]]",
+            "",
+        ]
 
-    fm_lines = ["---"]
-    fm_lines.extend(yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True).splitlines())
-    fm_lines.append("---")
-    full_content = "\n".join(fm_lines) + "\n" + "\n".join(body_lines) + "\n"
+        fm_lines = ["---"]
+        fm_lines.extend(
+            yaml.safe_dump(frontmatter, sort_keys=False, allow_unicode=True).splitlines()
+        )
+        fm_lines.append("---")
+        full_content = "\n".join(fm_lines) + "\n" + "\n".join(body_lines) + "\n"
 
-    # Capture pre-mutation index state for rollback on partial-write failure.
-    index_path = vault / "wiki" / "watchlist" / "index.md"
-    original_index_existed = index_path.exists()
-    original_index_bytes = index_path.read_bytes() if original_index_existed else None
+        watchlist_written = False
+        index_written = False
+        try:
+            atomic_write_bytes(watchlist_path, full_content.encode("utf-8"))
+            watchlist_written = True
 
-    watchlist_written = False
-    index_written = False
-    try:
-        atomic_write_bytes(watchlist_path, full_content.encode("utf-8"))
-        watchlist_written = True
+            _update_watchlist_index(vault, symbol, today, "promoted")
+            index_written = True
 
-        _update_watchlist_index(vault, symbol, today, "promoted")
-        index_written = True
-
-        _append_promotion_to_theme(theme_file_path, symbol, today)
-    except Exception as exc:
-        rollback_errors: list[str] = []
-        if index_written:
-            try:
-                if original_index_existed:
-                    atomic_write_bytes(index_path, original_index_bytes)
-                else:
-                    index_path.unlink(missing_ok=True)
-            except Exception as rb_exc:
-                rollback_errors.append(f"index restore: {rb_exc}")
-        if watchlist_written:
-            try:
-                watchlist_path.unlink()
-            except Exception as rb_exc:
-                rollback_errors.append(f"watchlist unlink: {rb_exc}")
-        if rollback_errors:
-            raise RuntimeError(
-                f"Promote failed (root cause below) AND rollback failed: "
-                + "; ".join(rollback_errors)
-            ) from exc
-        raise
+            _append_promotion_to_theme(theme_file_path, symbol, today)
+        except Exception as exc:
+            # Rollback under the same per-symbol lock that wraps the
+            # transaction. Index compensation re-reads under the index
+            # lock and removes only this symbol's row, so concurrent
+            # writers' rows are not stomped (m2.22 N2 fix).
+            rollback_errors: list[str] = []
+            if index_written:
+                try:
+                    remove_watchlist_index_row(vault, symbol)
+                except Exception as rb_exc:
+                    rollback_errors.append(f"index row removal: {rb_exc}")
+            if watchlist_written:
+                try:
+                    watchlist_path.unlink()
+                except Exception as rb_exc:
+                    rollback_errors.append(f"watchlist unlink: {rb_exc}")
+            if rollback_errors:
+                raise RuntimeError(
+                    f"Promote failed (root cause below) AND rollback failed: "
+                    + "; ".join(rollback_errors)
+                ) from exc
+            raise
 
     return watchlist_path
 

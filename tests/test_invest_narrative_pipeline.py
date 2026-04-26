@@ -598,9 +598,11 @@ up: "[[index]]"{ark_block}
             )
 
     def test_promote_rolls_back_index_and_watchlist_on_theme_failure(self):
-        """m2.22 F3: if the theme-log append fails, both the watchlist
-        file AND the index update must be rolled back to pre-promote
-        state."""
+        """m2.22 F3 + N2: if the theme-log append fails, the watchlist
+        file is unlinked and the LRCX row is removed from the index by
+        compensating removal under index lock (not by snapshot
+        restore -- snapshot restore would clobber concurrent writers
+        per the m2.22 re-review N2 finding)."""
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
             theme_path = td_path / "wiki" / "macro-themes" / "theme_ai-compute-demand.md"
@@ -619,16 +621,16 @@ up: "[[index]]"{ark_block}
                 watchlist_path.exists(),
                 "Watchlist file should have been rolled back",
             )
-            # Index did not exist before promote; it must not exist after rollback either.
-            self.assertFalse(
-                index_path.exists(),
-                "Watchlist index should have been rolled back to pre-promote state",
-            )
+            # Compensating-removal rollback leaves the index file in
+            # place but with no LRCX row.
+            self.assertTrue(index_path.exists())
+            content = index_path.read_text()
+            self.assertNotIn("| [[LRCX]]", content)
 
     def test_promote_preserves_existing_index_on_theme_failure(self):
-        """m2.22 F3: when an index already exists with prior rows, a
-        rollback must restore the prior bytes byte-for-byte (not delete
-        the index)."""
+        """m2.22 F3 + N2: when an index already has rows, rollback must
+        leave the unrelated rows intact while removing only this
+        symbol's row."""
         with tempfile.TemporaryDirectory() as td:
             td_path = Path(td)
             theme_path = td_path / "wiki" / "macro-themes" / "theme_ai-compute-demand.md"
@@ -658,11 +660,9 @@ up: "[[index]]"{ark_block}
                     promote_to_watchlist("LRCX", theme_path, vault_root=td_path)
 
             self.assertTrue(index_path.exists(), "Pre-existing index must survive rollback")
-            self.assertEqual(
-                index_path.read_text(),
-                prior_index,
-                "Index must be restored byte-for-byte",
-            )
+            content = index_path.read_text()
+            self.assertIn("| [[NVDA]]", content, "Unrelated NVDA row must survive rollback")
+            self.assertNotIn("| [[LRCX]]", content, "LRCX row must be removed by rollback")
 
 
 class CliTests(unittest.TestCase):
