@@ -10,10 +10,13 @@ import os
 import random
 import re
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+import openai
 
 MINIMAX_API_HOST = os.environ.get("MINIMAX_API_HOST", "https://api.minimaxi.com")
 CHAT_PATH = "/v1/text/chatcompletion_v2"
@@ -34,6 +37,7 @@ K2B_LLM_PROVIDER = os.environ.get("K2B_LLM_PROVIDER", "kimi").strip() or "kimi"
 KIMI_API_HOST = os.environ.get("KIMI_API_HOST", "https://api.kimi.com/coding")
 KIMI_MESSAGES_PATH = "/v1/messages"
 KIMI_DEFAULT_MODEL = os.environ.get("KIMI_DEFAULT_MODEL", "kimi-for-coding")
+OPENAI_SEARCH_MODEL = os.environ.get("OPENAI_SEARCH_MODEL", "gpt-5-search-api")
 
 # Retry constants (used only by the Kimi path -- K2Bi's existing MiniMax
 # branch is intentionally retry-free per its operational baseline; do not
@@ -85,6 +89,97 @@ def load_kimi_api_key() -> str:
         "KIMI_API_KEY not set and not found in ~/.zshrc. "
         "Export it or set K2B_LLM_PROVIDER=minimax to fall back."
     )
+
+
+def load_openai_api_key() -> str:
+    key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if key:
+        return key
+    zshrc = Path.home() / ".zshrc"
+    if zshrc.exists():
+        match = re.search(
+            r'^\s*export\s+OPENAI_API_KEY\s*=\s*"([^"]+)"',
+            zshrc.read_text(),
+            re.MULTILINE,
+        )
+        if match:
+            return match.group(1)
+    raise MinimaxError(
+        "OPENAI_API_KEY not set and not found in ~/.zshrc. "
+        'Export it or add: export OPENAI_API_KEY="..."'
+    )
+
+
+def _extract_json(text: str) -> dict:
+    """Strip optional markdown fences and locate the outermost JSON object."""
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("No JSON object found in response")
+    depth = 0
+    for i, ch in enumerate(text[start:], start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return json.loads(text[start : i + 1])
+    raise ValueError("No complete JSON object found in response")
+
+
+def openai_search_chat_completion(
+    messages: list,
+    *,
+    max_tokens: int,
+    temperature: float = 0.3,
+    timeout: int = DEFAULT_TIMEOUT_S,
+) -> dict:
+    """Call gpt-5-search-api via the OpenAI SDK and return a MiniMax-style envelope."""
+    api_key = load_openai_api_key()
+    client = openai.OpenAI(api_key=api_key, timeout=timeout)
+    kwargs: dict = {
+        "model": OPENAI_SEARCH_MODEL,
+        "messages": messages,
+        "max_completion_tokens": max_tokens,
+    }
+    if temperature is not None:
+        kwargs["temperature"] = temperature
+    try:
+        response = client.chat.completions.create(**kwargs)
+    except Exception as exc:
+        if "unsupported_value" in str(exc).lower() or "temperature" in str(exc).lower():
+            # Retry without temperature
+            kwargs.pop("temperature", None)
+            try:
+                response = client.chat.completions.create(**kwargs)
+            except Exception as exc2:
+                raise MinimaxError(f"OpenAI API error: {exc2}") from exc2
+        else:
+            raise MinimaxError(f"OpenAI API error: {exc}") from exc
+
+    text = response.choices[0].message.content or ""
+    return {
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": response.choices[0].finish_reason or "stop",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": response.usage.prompt_tokens if response.usage else None,
+            "completion_tokens": response.usage.completion_tokens if response.usage else None,
+            "total_tokens": response.usage.total_tokens if response.usage else None,
+        },
+        "base_resp": {"status_code": 0, "status_msg": "success"},
+    }
 
 
 def chat_completion(

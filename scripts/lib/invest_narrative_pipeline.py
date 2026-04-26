@@ -96,78 +96,171 @@ _SYSTEM_PROMPT = (
     "to take a macro narrative and produce a candidate ticker list that "
     "Keith will manually review.\n\n"
     "Critical rules you MUST follow:\n"
-    "1. Do NOT pick obvious 'pure-play' tickers if they are likely already "
-    "priced in. Prefer 2nd-order and 3rd-order beneficiaries.\n"
-    "2. For every ticker you propose, provide a 2-4 step reasoning chain "
-    "that shows HOW the narrative leads to that ticker.\n"
-    "3. For every ticker, cite ONE specific real news article URL or SEC "
+    "1. For every ticker you propose, provide a 2-4 step reasoning chain "
+    "that shows HOW the narrative leads to that ticker. Rank each ticker "
+    "by order of beneficiary (1st, 2nd, 3rd) based on economic logic. "
+    "Include 1st-order primary beneficiaries when their fundamentals support "
+    "the narrative; do NOT default to 2nd/3rd-order tail plays as a generic "
+    "preference. The right ranking is the one the economic structure dictates.\n"
+    "2. For every ticker, cite ONE specific real news article URL or SEC "
     "filing URL from the last 6 months that supports the connection. "
     "If you cannot cite a real source, do NOT include the ticker.\n"
-    "4. Skip companies with market cap below $2B.\n"
-    "5. Skip companies that have risen more than 90% in the last 90 days "
+    "3. Skip companies with market cap below $2B.\n"
+    "4. Skip companies that have risen more than 90% in the last 90 days "
     "unless the narrative is genuinely new (in which case flag them as "
     '"may already be priced in").\n\n'
     "Return ONLY a JSON object with no markdown formatting."
 )
 
 
-def _default_call1(narrative: str) -> list[dict]:
+def _default_call1(
+    narrative: str,
+    *,
+    order_preference: str = "any",
+    lived_signal: str | None = None,
+    llm_provider: str = "kimi-coding",
+) -> list[dict]:
     """Call 1: return sub-themes as list of dicts with 'name' and 'reasoning'."""
-    from scripts.lib.minimax_common import chat_completion, extract_assistant_text
+    from scripts.lib.minimax_common import extract_assistant_text
 
-    user = (
-        f'Narrative: "{narrative}"\n\n'
-        "Provide 4-6 sub-themes / value chain segments from this narrative. "
+    user_parts = [
+        f'Narrative: "{narrative}"\n',
+    ]
+    if lived_signal:
+        user_parts.append(
+            "\nOperator lived-signal context (treat as primary evidence; "
+            "weight equal to any other anchor when reasoning about this narrative):\n\n"
+            f"{lived_signal}\n"
+        )
+    user_parts.append(
+        "\nProvide 4-6 sub-themes / value chain segments from this narrative. "
         "For each sub-theme, give a one-line reasoning.\n"
-        "Return ONLY a JSON object like:\n"
+    )
+    if order_preference == "1st-emphasis":
+        user_parts.append(
+            "Strongly weight 1st-order primary beneficiaries; only include "
+            "2nd/3rd-order if their fundamentals are exceptional.\n"
+        )
+    elif order_preference == "tail-emphasis":
+        user_parts.append(
+            "Strongly prefer 2nd-order and 3rd-order beneficiaries; only include "
+            "1st-order if their fundamentals decisively dominate.\n"
+        )
+    user_parts.append(
+        'Return ONLY a JSON object like:\n'
         '{"sub_themes": [{"name": "...", "reasoning": "..."}]}'
     )
-    resp = chat_completion(
-        model="kimi-for-coding",
-        messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": user},
-        ],
-        max_tokens=2048,
-        temperature=0.3,
-    )
-    text = extract_assistant_text(resp)
-    data = _extract_json(text)
+    user = "".join(user_parts)
+
+    if llm_provider == "openai-search":
+        from scripts.lib.minimax_common import (
+            _extract_json as _extract_json_common,
+            openai_search_chat_completion,
+        )
+        resp = openai_search_chat_completion(
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=2048,
+            temperature=0.3,
+        )
+        text = extract_assistant_text(resp)
+        data = _extract_json_common(text)
+    else:
+        from scripts.lib.minimax_common import chat_completion
+        resp = chat_completion(
+            model="kimi-for-coding",
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=2048,
+            temperature=0.3,
+        )
+        text = extract_assistant_text(resp)
+        data = _extract_json(text)
     return data.get("sub_themes", [])
 
 
-def _default_call2(narrative: str, sub_theme: dict) -> list[dict]:
+def _default_call2(
+    narrative: str,
+    sub_theme: dict,
+    *,
+    order_preference: str = "any",
+    lived_signal: str | None = None,
+    llm_provider: str = "kimi-coding",
+) -> list[dict]:
     """Call 2: return candidates for a single sub-theme."""
-    from scripts.lib.minimax_common import chat_completion, extract_assistant_text
+    from scripts.lib.minimax_common import extract_assistant_text
 
-    user = (
+    user_parts = [
         f'Narrative: "{narrative}"\n'
-        f'Sub-theme: "{sub_theme["name"]}" -- {sub_theme["reasoning"]}\n\n'
-        "For this sub-theme, provide 2-3 candidate tickers with:\n"
+        f'Sub-theme: "{sub_theme["name"]}" -- {sub_theme["reasoning"]}\n',
+    ]
+    if lived_signal:
+        user_parts.append(
+            "\nOperator lived-signal context (treat as primary evidence; "
+            "weight equal to any other anchor when reasoning about this narrative):\n\n"
+            f"{lived_signal}\n"
+        )
+    user_parts.append(
+        "\nFor this sub-theme, provide 2-3 candidate tickers with:\n"
         "- Symbol\n"
         "- Reasoning chain (2-4 steps)\n"
         "- Citation URL (real, last 6 months)\n"
         '- Order of beneficiary (1st, 2nd, 3rd)\n'
         "- ARK 6-metric initial scores (1-10 each): people_culture, "
         "rd_execution, moat, product_leadership, thesis_risk, valuation\n\n"
-        "Return ONLY a JSON object like:\n"
+    )
+    if order_preference == "1st-emphasis":
+        user_parts.append(
+            "Strongly weight 1st-order primary beneficiaries; only include "
+            "2nd/3rd-order if their fundamentals are exceptional.\n"
+        )
+    elif order_preference == "tail-emphasis":
+        user_parts.append(
+            "Strongly prefer 2nd-order and 3rd-order beneficiaries; only include "
+            "1st-order if their fundamentals decisively dominate.\n"
+        )
+    user_parts.append(
+        'Return ONLY a JSON object like:\n'
         '{"candidates": [{"symbol": "...", "reasoning_chain": "...", '
         '"citation_url": "...", "order": "1st", '
         '"ark_scores": {"people_culture": 8, "rd_execution": 9, '
         '"moat": 9, "product_leadership": 9, "thesis_risk": 7, '
         '"valuation": 6}}]}'
     )
-    resp = chat_completion(
-        model="kimi-for-coding",
-        messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": user},
-        ],
-        max_tokens=4096,
-        temperature=0.3,
-    )
-    text = extract_assistant_text(resp)
-    data = _extract_json(text)
+    user = "".join(user_parts)
+
+    if llm_provider == "openai-search":
+        from scripts.lib.minimax_common import (
+            _extract_json as _extract_json_common,
+            openai_search_chat_completion,
+        )
+        resp = openai_search_chat_completion(
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=4096,
+            temperature=0.3,
+        )
+        text = extract_assistant_text(resp)
+        data = _extract_json_common(text)
+    else:
+        from scripts.lib.minimax_common import chat_completion
+        resp = chat_completion(
+            model="kimi-for-coding",
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=4096,
+            temperature=0.3,
+        )
+        text = extract_assistant_text(resp)
+        data = _extract_json(text)
     candidates = data.get("candidates", [])
     for c in candidates:
         c["sub_theme"] = sub_theme["name"]
@@ -372,6 +465,9 @@ def run_pipeline(
     vault_root: Path | None = None,
     call1_fn: Callable[[str], list[dict]] | None = None,
     call2_fn: Callable[[str, dict], list[dict]] | None = None,
+    order_preference: str = "any",
+    lived_signal: str | None = None,
+    llm_provider: str = "kimi-coding",
 ) -> Path:
     """Run the two-call invest-narrative pipeline and return the theme file path.
 
@@ -384,12 +480,24 @@ def run_pipeline(
     :func:`scripts.lib.minimax_common.chat_completion`.
     """
     vault = resolve_vault_root(vault_root)
+    run_started_at = datetime.now(timezone.utc).isoformat()
     slug = _derive_slug(narrative, vault)
 
     if call1_fn is None:
-        call1_fn = _default_call1
+        call1_fn = lambda n: _default_call1(
+            n,
+            order_preference=order_preference,
+            lived_signal=lived_signal,
+            llm_provider=llm_provider,
+        )
     if call2_fn is None:
-        call2_fn = _default_call2
+        call2_fn = lambda n, st: _default_call2(
+            n,
+            st,
+            order_preference=order_preference,
+            lived_signal=lived_signal,
+            llm_provider=llm_provider,
+        )
 
     # Fail fast on missing registry before spending LLM calls
     registry = load_registry(vault)
@@ -431,29 +539,75 @@ def run_pipeline(
     rejected_malformed = 0
     priced_in_warnings: list[str] = []
     skipped_checks: list[dict] = []
+    rejected: list[dict] = []
 
     for cand in all_candidates:
+        raw_cand = dict(cand) if isinstance(cand, dict) else cand
         if not isinstance(cand, dict):
+            rejected.append({
+                "symbol": None,
+                "reason": "malformed_output",
+                "sub_theme": None,
+                "raw_candidate": raw_cand,
+                "details": "candidate was not a dict",
+            })
             rejected_malformed += 1
             continue
         raw_sym = cand.get("symbol")
         if not isinstance(raw_sym, str) or not raw_sym.strip():
+            rejected.append({
+                "symbol": None,
+                "reason": "malformed_output",
+                "sub_theme": cand.get("sub_theme"),
+                "raw_candidate": raw_cand,
+                "details": "missing or empty symbol",
+            })
             rejected_malformed += 1
             continue
         symbol = raw_sym.strip().upper()
         # Validate required fields from Call 2 before processing
         required_fields = ("order", "reasoning_chain", "citation_url", "ark_scores")
         if not all(k in cand for k in required_fields):
+            missing = [k for k in required_fields if k not in cand]
+            rejected.append({
+                "symbol": symbol,
+                "reason": "malformed_output",
+                "sub_theme": cand.get("sub_theme"),
+                "raw_candidate": raw_cand,
+                "details": f"missing required fields: {', '.join(missing)}",
+            })
             rejected_malformed += 1
             continue
         if not cand.get("order") or not cand.get("reasoning_chain") or not cand.get("citation_url"):
+            empty = [k for k in ("order", "reasoning_chain", "citation_url") if not cand.get(k)]
+            rejected.append({
+                "symbol": symbol,
+                "reason": "malformed_output",
+                "sub_theme": cand.get("sub_theme"),
+                "raw_candidate": raw_cand,
+                "details": f"empty required fields: {', '.join(empty)}",
+            })
             rejected_malformed += 1
             continue
         order_normalized = str(cand.get("order", "")).strip().lower()
         if order_normalized not in {"1st", "2nd", "3rd"}:
+            rejected.append({
+                "symbol": symbol,
+                "reason": "malformed_output",
+                "sub_theme": cand.get("sub_theme"),
+                "raw_candidate": raw_cand,
+                "details": f"invalid order value: {cand.get('order')!r}",
+            })
             rejected_malformed += 1
             continue
         if not isinstance(cand.get("ark_scores"), dict):
+            rejected.append({
+                "symbol": symbol,
+                "reason": "malformed_output",
+                "sub_theme": cand.get("sub_theme"),
+                "raw_candidate": raw_cand,
+                "details": "ark_scores is not a dict",
+            })
             rejected_malformed += 1
             continue
         cand["symbol"] = symbol
@@ -461,6 +615,13 @@ def run_pipeline(
 
         # 1. Ticker exists
         if not validate_ticker_exists(symbol, registry):
+            rejected.append({
+                "symbol": symbol,
+                "reason": "hallucinated_symbol",
+                "sub_theme": cand.get("sub_theme"),
+                "raw_candidate": raw_cand,
+                "details": symbol,
+            })
             rejected_symbol += 1
             continue
 
@@ -471,6 +632,13 @@ def run_pipeline(
         except ValidatorSkipped as exc:
             skipped_checks.append({"symbol": symbol, "check": "market_cap", "reason": exc.reason})
         if not cap_pass:
+            rejected.append({
+                "symbol": symbol,
+                "reason": "below_market_cap",
+                "sub_theme": cand.get("sub_theme"),
+                "raw_candidate": raw_cand,
+                "details": symbol,
+            })
             rejected_cap += 1
             continue
 
@@ -481,12 +649,26 @@ def run_pipeline(
         except ValidatorSkipped as exc:
             skipped_checks.append({"symbol": symbol, "check": "liquidity", "reason": exc.reason})
         if not liq_pass:
+            rejected.append({
+                "symbol": symbol,
+                "reason": "below_liquidity",
+                "sub_theme": cand.get("sub_theme"),
+                "raw_candidate": raw_cand,
+                "details": symbol,
+            })
             rejected_liq += 1
             continue
 
         # 4. Citation URL
         url = cand.get("citation_url", "")
         if not url or not validate_citation_url(url):
+            rejected.append({
+                "symbol": symbol,
+                "reason": "no_working_citation",
+                "sub_theme": cand.get("sub_theme"),
+                "raw_candidate": raw_cand,
+                "details": url or "missing",
+            })
             rejected_citation += 1
             continue
 
@@ -532,6 +714,18 @@ def run_pipeline(
         narrative, slug, good_sub_themes, validated, priced_in_warnings, stats, skipped_checks
     )
     atomic_write_bytes(theme_path, content)
+
+    rejected_path = theme_path.with_suffix(".rejected.json")
+    rejected_payload = {
+        "theme_file": theme_path.name,
+        "narrative": narrative,
+        "run_started_at": run_started_at,
+        "llm_provider": llm_provider,
+        "rejected": rejected,
+    }
+    atomic_write_bytes(
+        rejected_path, json.dumps(rejected_payload, indent=2).encode("utf-8")
+    )
 
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     _update_macro_themes_index(vault, slug, _narrative_to_title(narrative), today, len(validated))
@@ -789,6 +983,23 @@ def main(argv: list[str] | None = None) -> int:
         "--narrative",
         help="Run the pipeline for the given narrative text",
     )
+    parser.add_argument(
+        "--order-preference",
+        choices=["any", "1st-emphasis", "tail-emphasis"],
+        default="any",
+        help="Control beneficiary-order bias in LLM prompts",
+    )
+    parser.add_argument(
+        "--lived-signal",
+        metavar="FILE",
+        help="Path to a markdown file with operator-lived context to inject",
+    )
+    parser.add_argument(
+        "--llm-provider",
+        choices=["kimi-coding", "openai-search"],
+        default="kimi-coding",
+        help="LLM provider for the pipeline",
+    )
 
     args = parser.parse_args(argv)
 
@@ -800,7 +1011,21 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.narrative:
-        path = run_pipeline(args.narrative)
+        lived_signal = None
+        if args.lived_signal:
+            lived_path = Path(args.lived_signal)
+            if not lived_path.exists():
+                parser.error(f"--lived-signal file not found: {args.lived_signal}")
+            try:
+                lived_signal = lived_path.read_text(encoding="utf-8")
+            except OSError as exc:
+                parser.error(f"--lived-signal file not readable: {args.lived_signal}: {exc}")
+        path = run_pipeline(
+            args.narrative,
+            order_preference=args.order_preference,
+            lived_signal=lived_signal,
+            llm_provider=args.llm_provider,
+        )
         print(path)
         return 0
 

@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from scripts.lib.invest_narrative_pipeline import (
+    _SYSTEM_PROMPT,
+    _default_call1,
+    _default_call2,
     _derive_slug,
     _extract_json,
     _find_candidate_in_theme,
@@ -726,7 +730,12 @@ class CliTests(unittest.TestCase):
         mock_run.return_value = Path("/vault/wiki/macro-themes/theme_test.md")
         code = main(["--narrative", "Test narrative"])
         self.assertEqual(code, 0)
-        mock_run.assert_called_once_with("Test narrative")
+        mock_run.assert_called_once_with(
+            "Test narrative",
+            order_preference="any",
+            lived_signal=None,
+            llm_provider="kimi-coding",
+        )
 
     def test_cli_no_args(self):
         code = main([])
@@ -735,6 +744,285 @@ class CliTests(unittest.TestCase):
     def test_cli_promote_missing_theme_file(self):
         with self.assertRaises(SystemExit):
             main(["--promote", "LRCX"])
+
+
+class SystemPromptTests(unittest.TestCase):
+    def test_no_hardcoded_prefer_2nd_3rd(self):
+        self.assertNotIn("Prefer 2nd-order and 3rd-order", _SYSTEM_PROMPT)
+
+
+class OrderPreferenceTests(unittest.TestCase):
+    @patch("scripts.lib.minimax_common.chat_completion")
+    def test_any_does_not_append(self, mock_chat):
+        mock_chat.return_value = {
+            "choices": [{"message": {"content": '{"sub_themes": []}'}}]
+        }
+        _default_call1("Test narrative", order_preference="any")
+        user = mock_chat.call_args[1]["messages"][1]["content"]
+        self.assertNotIn("Strongly weight 1st-order", user)
+        self.assertNotIn("Strongly prefer 2nd-order", user)
+
+    @patch("scripts.lib.minimax_common.chat_completion")
+    def test_1st_emphasis_appended_to_call1(self, mock_chat):
+        mock_chat.return_value = {
+            "choices": [{"message": {"content": '{"sub_themes": []}'}}]
+        }
+        _default_call1("Test narrative", order_preference="1st-emphasis")
+        user = mock_chat.call_args[1]["messages"][1]["content"]
+        self.assertIn(
+            "Strongly weight 1st-order primary beneficiaries; only include "
+            "2nd/3rd-order if their fundamentals are exceptional.",
+            user,
+        )
+
+    @patch("scripts.lib.minimax_common.chat_completion")
+    def test_tail_emphasis_appended_to_call1(self, mock_chat):
+        mock_chat.return_value = {
+            "choices": [{"message": {"content": '{"sub_themes": []}'}}]
+        }
+        _default_call1("Test narrative", order_preference="tail-emphasis")
+        user = mock_chat.call_args[1]["messages"][1]["content"]
+        self.assertIn(
+            "Strongly prefer 2nd-order and 3rd-order beneficiaries; only include "
+            "1st-order if their fundamentals decisively dominate.",
+            user,
+        )
+
+    @patch("scripts.lib.minimax_common.chat_completion")
+    def test_1st_emphasis_appended_to_call2(self, mock_chat):
+        mock_chat.return_value = {
+            "choices": [{"message": {"content": '{"candidates": []}'}}]
+        }
+        _default_call2(
+            "Test narrative",
+            {"name": "ST", "reasoning": "R"},
+            order_preference="1st-emphasis",
+        )
+        user = mock_chat.call_args[1]["messages"][1]["content"]
+        self.assertIn(
+            "Strongly weight 1st-order primary beneficiaries; only include "
+            "2nd/3rd-order if their fundamentals are exceptional.",
+            user,
+        )
+
+    @patch("scripts.lib.minimax_common.chat_completion")
+    def test_tail_emphasis_appended_to_call2(self, mock_chat):
+        mock_chat.return_value = {
+            "choices": [{"message": {"content": '{"candidates": []}'}}]
+        }
+        _default_call2(
+            "Test narrative",
+            {"name": "ST", "reasoning": "R"},
+            order_preference="tail-emphasis",
+        )
+        user = mock_chat.call_args[1]["messages"][1]["content"]
+        self.assertIn(
+            "Strongly prefer 2nd-order and 3rd-order beneficiaries; only include "
+            "1st-order if their fundamentals decisively dominate.",
+            user,
+        )
+
+
+class LivedSignalTests(unittest.TestCase):
+    @patch("scripts.lib.minimax_common.chat_completion")
+    def test_lived_signal_injected_into_call1(self, mock_chat):
+        mock_chat.return_value = {
+            "choices": [{"message": {"content": '{"sub_themes": []}'}}]
+        }
+        _default_call1("Test narrative", lived_signal="Signal text here.")
+        user = mock_chat.call_args[1]["messages"][1]["content"]
+        self.assertIn(
+            "Operator lived-signal context (treat as primary evidence; "
+            "weight equal to any other anchor when reasoning about this narrative):",
+            user,
+        )
+        self.assertIn("Signal text here.", user)
+
+    @patch("scripts.lib.minimax_common.chat_completion")
+    def test_lived_signal_injected_into_call2(self, mock_chat):
+        mock_chat.return_value = {
+            "choices": [{"message": {"content": '{"candidates": []}'}}]
+        }
+        _default_call2(
+            "Test narrative",
+            {"name": "ST", "reasoning": "R"},
+            lived_signal="Signal text here.",
+        )
+        user = mock_chat.call_args[1]["messages"][1]["content"]
+        self.assertIn(
+            "Operator lived-signal context (treat as primary evidence; "
+            "weight equal to any other anchor when reasoning about this narrative):",
+            user,
+        )
+        self.assertIn("Signal text here.", user)
+
+    @patch("scripts.lib.invest_narrative_pipeline.run_pipeline")
+    def test_cli_lived_signal_from_fixture(self, mock_run):
+        mock_run.return_value = Path("/vault/wiki/macro-themes/theme_test.md")
+        fixture = Path(__file__).with_name("fixtures") / "lived_signal_smoke.md"
+        code = main(["--narrative", "Test", "--lived-signal", str(fixture)])
+        self.assertEqual(code, 0)
+        args = mock_run.call_args
+        self.assertIn("lived_signal", args.kwargs)
+        self.assertIn("Operator runs a small office", args.kwargs["lived_signal"])
+
+    def test_cli_missing_lived_signal_file(self):
+        with self.assertRaises(SystemExit) as ctx:
+            main(["--narrative", "Test", "--lived-signal", "/nonexistent/path.md"])
+        self.assertEqual(ctx.exception.code, 2)
+
+
+class ProviderDispatchTests(unittest.TestCase):
+    @patch("scripts.lib.minimax_common.openai_search_chat_completion")
+    def test_openai_search_routed_for_call1(self, mock_openai):
+        mock_openai.return_value = {
+            "choices": [{"message": {"content": '{"sub_themes": []}'}}]
+        }
+        _default_call1("Test narrative", llm_provider="openai-search")
+        mock_openai.assert_called_once()
+        args = mock_openai.call_args[1]
+        self.assertEqual(args["max_tokens"], 2048)
+
+    @patch("scripts.lib.minimax_common.chat_completion")
+    def test_kimi_coding_routed_for_call1(self, mock_kimi):
+        mock_kimi.return_value = {
+            "choices": [{"message": {"content": '{"sub_themes": []}'}}]
+        }
+        _default_call1("Test narrative", llm_provider="kimi-coding")
+        mock_kimi.assert_called_once()
+        args = mock_kimi.call_args[1]
+        self.assertEqual(args["model"], "kimi-for-coding")
+
+    @patch("scripts.lib.minimax_common.openai_search_chat_completion")
+    def test_openai_search_routed_for_call2(self, mock_openai):
+        mock_openai.return_value = {
+            "choices": [{"message": {"content": '{"candidates": []}'}}]
+        }
+        _default_call2(
+            "Test narrative",
+            {"name": "ST", "reasoning": "R"},
+            llm_provider="openai-search",
+        )
+        mock_openai.assert_called_once()
+        args = mock_openai.call_args[1]
+        self.assertEqual(args["max_tokens"], 4096)
+
+    @patch("scripts.lib.minimax_common.chat_completion")
+    def test_kimi_coding_routed_for_call2(self, mock_kimi):
+        mock_kimi.return_value = {
+            "choices": [{"message": {"content": '{"candidates": []}'}}]
+        }
+        _default_call2(
+            "Test narrative",
+            {"name": "ST", "reasoning": "R"},
+            llm_provider="kimi-coding",
+        )
+        mock_kimi.assert_called_once()
+        args = mock_kimi.call_args[1]
+        self.assertEqual(args["model"], "kimi-for-coding")
+
+
+class RejectionLogTests(unittest.TestCase):
+    def _mock_call1(self, narrative: str) -> list[dict]:
+        return [
+            {"name": "Sub-theme A", "reasoning": "Reason A"},
+            {"name": "Sub-theme B", "reasoning": "Reason B"},
+            {"name": "Sub-theme C", "reasoning": "Reason C"},
+            {"name": "Sub-theme D", "reasoning": "Reason D"},
+        ]
+
+    def _mock_call2_mixed(self, narrative: str, sub_theme: dict) -> list[dict]:
+        if sub_theme["name"] == "Sub-theme A":
+            return [
+                {
+                    "symbol": "VALID",
+                    "reasoning_chain": "ok",
+                    "citation_url": "https://example.com/valid",
+                    "order": "2nd",
+                    "ark_scores": {},
+                    "sub_theme": sub_theme["name"],
+                },
+                {
+                    "symbol": "BADURL",
+                    "reasoning_chain": "ok",
+                    "citation_url": "https://example.com/bad",
+                    "order": "3rd",
+                    "ark_scores": {},
+                    "sub_theme": sub_theme["name"],
+                },
+                {
+                    "symbol": "FAKESYM",
+                    "reasoning_chain": "ok",
+                    "citation_url": "https://example.com/fake",
+                    "order": "1st",
+                    "ark_scores": {},
+                    "sub_theme": sub_theme["name"],
+                },
+            ]
+        return [
+            {
+                "symbol": "VALID2",
+                "reasoning_chain": "ok",
+                "citation_url": "https://example.com/valid2",
+                "order": "3rd",
+                "ark_scores": {},
+                "sub_theme": sub_theme["name"],
+            },
+        ]
+
+    @patch("scripts.lib.invest_narrative_pipeline.load_registry")
+    @patch("scripts.lib.invest_narrative_pipeline.validate_ticker_exists")
+    @patch("scripts.lib.invest_narrative_pipeline.validate_market_cap")
+    @patch("scripts.lib.invest_narrative_pipeline.validate_liquidity")
+    @patch("scripts.lib.invest_narrative_pipeline.validate_citation_url")
+    @patch("scripts.lib.invest_narrative_pipeline.validate_priced_in")
+    def test_rejected_json_written_with_schema(
+        self,
+        mock_priced_in,
+        mock_citation,
+        mock_liq,
+        mock_cap,
+        mock_exists,
+        mock_registry,
+    ):
+        mock_registry.return_value = {"VALID": {}, "VALID2": {}, "BADURL": {}}
+        mock_exists.side_effect = lambda s, r: s in {"VALID", "VALID2", "BADURL"}
+        mock_cap.return_value = True
+        mock_liq.return_value = True
+        mock_citation.side_effect = lambda url: "valid" in url
+        mock_priced_in.return_value = {"flagged": False, "skipped": False}
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            (td_path / "wiki" / "macro-themes").mkdir(parents=True)
+            path = run_pipeline(
+                "Test narrative",
+                vault_root=td_path,
+                call1_fn=self._mock_call1,
+                call2_fn=self._mock_call2_mixed,
+            )
+            rejected_path = path.with_suffix(".rejected.json")
+            self.assertTrue(rejected_path.exists())
+            payload = json.loads(rejected_path.read_text())
+            self.assertEqual(payload["theme_file"], path.name)
+            self.assertEqual(payload["narrative"], "Test narrative")
+            self.assertIn("run_started_at", payload)
+            self.assertEqual(payload["llm_provider"], "kimi-coding")
+            rejected = payload["rejected"]
+            # Should contain BADURL (no_working_citation) and FAKESYM (hallucinated_symbol)
+            reasons = {r["reason"] for r in rejected}
+            self.assertIn("no_working_citation", reasons)
+            self.assertIn("hallucinated_symbol", reasons)
+            # VALID should NOT be in rejected list
+            for r in rejected:
+                self.assertNotEqual(r["symbol"], "VALID")
+            # Schema checks
+            for r in rejected:
+                self.assertIn("symbol", r)
+                self.assertIn("reason", r)
+                self.assertIn("sub_theme", r)
+                self.assertIn("raw_candidate", r)
+                self.assertIn("details", r)
 
 
 class IndexUpdaterTests(unittest.TestCase):
