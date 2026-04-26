@@ -1,3 +1,51 @@
+## 2026-04-26 -- Phase 3.8.5 invest-narrative durable fixes A-E + OpenAI timeout fix (Ship 2 hardening)
+
+**Commit:** `5647e1d` feat(invest-narrative): Phase 3.8.5 durable fixes A-E + OpenAI timeout fix
+
+**Triggered by:** Phase 3.8 Stage 1 trial runs on the N2 narrative ("Open-source models closing gap with closed-source drives household and small-company adoption of local agent infrastructure"). Four LLM/prompt variants ran on 2026-04-26 and surfaced two real defects: (1) the hardcoded "prefer 2nd/3rd-order beneficiaries" rule in `_SYSTEM_PROMPT` made both Kimi K2.6 and gpt-5.4 ignore architect-expected 1st-order beneficiaries (AAPL/AMD/QCOM/ARM); (2) un-grounded LLMs hallucinated citation URLs at ~94% kill rate. Four retro theme files at `wiki/macro-themes/theme_open-source-models-closing-gap-with-closed-source{,_2,_3,_4}.md` are immutable Phase 3.8 retro evidence and were not touched.
+
+**What shipped (5 bounded changes built by Kimi K2.6 via .kimi/job.md handoff):**
+- **A**: strip "Prefer 2nd/3rd-order" from `_SYSTEM_PROMPT` and renumber rules. Right ranking is what economic structure dictates, not a global default.
+- **B**: `--order-preference {any|1st-emphasis|tail-emphasis}` CLI flag appends one bias sentence to call1 + call2 user prompts (per-narrative override).
+- **C**: `--lived-signal FILE` CLI flag injects operator-supplied markdown verbatim into call1 + call2 user prompts after narrative title. Missing/unreadable file exits 2 with clear stderr.
+- **D**: `--llm-provider {kimi-coding|openai-search}` CLI flag dispatches in `_default_call1` / `_default_call2`. New `openai_search_chat_completion()` + `load_openai_api_key()` + module-level `_extract_json` in `scripts/lib/minimax_common.py`. Uses `max_completion_tokens` (not `max_tokens`); temperature retry on `unsupported_value` OR `temperature` substring per `/tmp/run_narrative_via_gpt5_search.py:103`; no `response_format={"type":"json_object"}` (gpt-5-search-api rejects it).
+- **E**: atomic `theme_<slug>.rejected.json` sibling write captures every dropped candidate with reason vocabulary `{no_working_citation, hallucinated_symbol, below_market_cap, below_liquidity, malformed_output}`. No dedup so repeated LLM mistakes stay visible.
+
+**Inline fix during Opus verification (Kimi reviewer-finding F6, real bug):** `openai_search_chat_completion` accepted a `timeout` parameter but never propagated it to the OpenAI SDK. Fixed by passing `timeout=timeout` to the `openai.OpenAI` client constructor (1-line change). SDK previously defaulted to 600s vs pipeline's 300s.
+
+**Tests:** 1342 passed, 1 skipped, 0 failed (was 1319 baseline; +23 new). Smoke run on water-stress narrative (NOT the N2 narrative; that is the next K2Bi session) produced theme + `.rejected.json` (6034B + 19897B, 12 rejection rows, valid schema).
+
+**Codex review:** **operator-acknowledged anomaly: review skipped via dual-failure + Kimi-self-review override.**
+- Codex: EISDIR'd on `.claude/worktrees/suspicious-rhodes-48299c` (live worktree from PR #7 merge earlier today; not deletable without operator call)
+- MiniMax M2.7: 2x `RemoteDisconnected` on POST despite api.minimaxi.com reachable in 2.5s (payload was 47k tokens; M2.7 rejected before sending response bytes)
+- Kimi-backed reviewer: ran successfully and surfaced 7 findings, but L-2026-04-26-001 forbids Kimi reviewing Kimi-built diffs (forbidden self-review)
+- **Operator override 2026-04-26 (option 3 in the operator's three-option ladder)**: accept Kimi self-review as the review of record THIS ONCE; F6 fixed inline; 6 other Kimi findings deferred with rationale. Audit trailer: `Review-Anomaly: codex-eisdir-minimax-disconnect-kimi-self-review-override-L-2026-04-26-001`. Precedent does NOT extend to future Kimi-built ships -- L-2026-04-26-001 still applies; this override exists because Codex AND M2.7 were simultaneously down.
+
+**Deferred Kimi findings:**
+- F1 high (run_pipeline kwarg signature): false alarm; both `/tmp` reference scripts use keyword args
+- F2 high (with_suffix(".rejected.json") drops .md): matches spec wording; collision risk hypothetical
+- F3 high (temperature retry "temperature" substring too broad): matches `/tmp/run_narrative_via_gpt5_search.py:103` reference (spec-approved)
+- F4 medium (lived_signal length cap): operator owns content; deferred to Phase 4 backlog
+- F5 medium (lambda introspection): speculative; no caller introspects
+- F7 low (rejected.json before index update orphan risk): minor ordering
+
+**Feature status change:** `feature_invest-narrative-mvp` stays at `status: ship-2-shipped` (this is a hardening pass on the already-shipped Ship 2, not a new ship transition). Updates section appended to the feature note documenting Phase 3.8.5.
+
+**Follow-ups:**
+- Phase 4 backlog: non-interactive shell secret loader (smoke would fail without `OPENAI_API_KEY` pre-exported in interactive shell)
+- Phase 4 backlog: post-hoc citation scrape from EDGAR / IR / yfinance (12 candidates rejected on stale URLs in smoke run; live scrape could recover some)
+- Next K2Bi session: re-run Phase 3.8 Stage 1 on the N2 narrative with the new flags (`--llm-provider openai-search --order-preference any --lived-signal <vault-file>`)
+
+**Key decisions:**
+- **Override of L-2026-04-26-001 was a deliberate one-time call**, not a relaxation. The architect rule (no Kimi-self-review on Kimi-built diffs) stands; this ship took the override because Codex AND M2.7 were simultaneously down and the alternative was indefinite block on a 5-fix bundle that already had 1342 passing tests + a clean smoke run + Opus independent verification of all high-impact reviewer findings.
+- **F6 inline fix** preferred over deferred follow-up because it was a 1-line non-controversial bug with passing tests already covering the function.
+- **No DEVLOG-only re-review attempt** for Codex via temporary worktree relocation, because the worktree is real ongoing state (PR #7 merge was 1h ago) and removing it without operator approval would violate auto-mode "do not take overly destructive actions."
+- **Build route**: kimi-handoff via `.kimi/job.md` (spec by Opus, implementation by Kimi K2.6 in VSCode, verification + override + ship by Opus). Total spec-to-ship: ~45 min including the dual-review-failure recovery dance.
+
+**Related:** L-2026-04-26-001 (Codex EISDIR -> MiniMax M2.7 fallback rule for Kimi-built diffs); the four Phase 3.8 retro theme files at `K2Bi-Vault/wiki/macro-themes/theme_open-source-models-closing-gap-with-closed-source*.md`; reference scripts at `/tmp/run_narrative_via_gpt5_search{,_v2}.py`.
+
+---
+
 ## 2026-04-26 -- minimax-review parser + validator hardened against malformed-success (P3 follow-up from m2.22 triage)
 
 **Commit:** `00b3953` fix(minimax-review): harden review-output parser + validator against malformed-success
