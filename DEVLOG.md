@@ -1,3 +1,32 @@
+## 2026-04-26 -- invest-screen Stage-2 enricher SHIPPED -- Phase 3.7 m2.13
+
+**Commit:** `1bc85c3` feat: invest-screen Stage-2 enricher (m2.13)
+
+**What shipped:**
+- `scripts/lib/invest_screen.py`: CLI with `--enrich`, `--manual-promote`, `--re-enrich` flags. Reads Stage-1 watchlist entries (promoted by invest-narrative Ship 2) and adds Quick Score 0-100, 14 sub-factor breakdown, rating band A/B/C/D/F via LLM call routed through `minimax_common.chat_completion`.
+- `scripts/lib/data/invest_screen_bands_v1.json`: machine-readable band definitions (band_definition_version: 1).
+- `tests/test_invest_screen.py`: 41 tests covering enrich flow, manual promote, LLM retry logic, atomic rollback on index-write failure, idempotency, CLI parsing, and math invariant validation.
+- `.claude/skills/invest-screen/SKILL.md`: replaced Phase 2 stub with Stage-2 enricher spec, ownership boundaries, LLM scoring contract, and Phase 4 stub.
+- `.claude/skills/invest-screen/eval/cases/`: 10 eval cases and `learnings.md`.
+
+**Safety patterns:**
+- Watchlist write rolls back to original bytes if index update fails (enrich path).
+- Manual-promote deletes the newly created file if index update fails.
+- LLM output validated with strict math invariants; up to 2 retries before failing loud.
+- Stage-1 fields preserved byte-for-byte; only `status` (promoted -> screened) and Stage-2 keys are mutated.
+
+**Review trail:**
+- Codex skipped (EISDIR on eval directory).
+- MiniMax-M2.7 review (K2B_LLM_PROVIDER=minimax) ran as forced fallback per L-2026-04-26-001.
+- Reviewer flagged 4 findings; 2 addressed (rollback safety in both paths, broader LLM retry exception catching), 2 noted as matching existing codebase patterns (TOCTOU race, file locking) and deferred.
+
+**Feature status change:** invest-screen `stub` -> `ready`
+
+**Follow-ups:**
+- Phase 4: replace LLM scoring with yfinance + technical-indicator library, bump band_definition_version 1 -> 2.
+
+---
+
 ## 2026-04-26 -- OPS: IB Gateway daily-restart outage RESOLVED -- 2h10m DisconnectedError outage caused by IBC's `Auto logoff` setting; switched Lock-and-Exit to `Auto restart` so future daily-restart cycles self-heal (~30-60s instead of indefinite)
 
 **Type:** Operations incident, not a code ship. No commit. Configuration-only change applied via IB Gateway UI on the VPS.
