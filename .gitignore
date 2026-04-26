@@ -55,5 +55,12 @@ logs/
 # written by scripts/lib/deploy_config.py record-sync; never deployed
 .sync-state/
 
-# Kimi handoff job specs (local only)
-.kimi/
+# Kimi handoff job specs (local only) -- with one tracked exception:
+# .kimi/post-build-hook.sh is the per-repo post-build hook contract
+# from the kimi-handoff convention; it must travel with the repo so a
+# fresh clone runs the same propagation step on /ship. Use .kimi/*
+# (glob) rather than .kimi/ (directory) so the negation can take
+# effect at the file level — git skips negation when the parent
+# directory itself is ignored.
+.kimi/*
+!.kimi/post-build-hook.sh

@@ -89,3 +89,8 @@ excludes:
   - AGENTS.md
   # Tests run locally (VPS runs the engine, not the test suite)
   - tests
+  # Kimi-handoff workspace -- local job specs + archive + the per-repo
+  # post-build-hook contract. The hook runs locally during /invest-ship
+  # (modifies the Syncthing-managed K2Bi-Vault planning mirror docs);
+  # nothing here is rsync-deployed.
+  - .kimi

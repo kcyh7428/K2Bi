@@ -435,6 +435,14 @@ Types: `feat`, `fix`, `refactor`, `docs`, `chore`, `infra`. **Never use em dashe
 
 Show Keith the draft. Confirm before committing.
 
+### 4a. Per-repo post-build hook
+
+Before staging or committing, check whether the repo carries a per-repo post-build hook at `.kimi/post-build-hook.sh` (relative to the git repo root). When the file exists and is executable, run it. The hook is the kimi-handoff convention's bridge between "build pass conditions all green" and "ship": each repo decides what its hook does (K2Bi's hook propagates Phase-3 / Bundle-5 status snapshots into the Syncthing-managed planning mirror docs via `python3 -m scripts.lib.propagate_planning_status`).
+
+If the hook exits non-zero, surface its stderr to Keith verbatim and STOP -- do NOT proceed to commit. The hook is allowed to mutate repo files OR Syncthing-managed sibling-vault files; whichever paths the hook touched in the working tree must be staged in this same ship commit so the audit trail captures both the hook input (the source-of-truth edit Keith just made) and the hook output (the regenerated mirror snippets) atomically. When the hook only writes to vault paths outside the repo (which is K2Bi's normal case -- the planning mirror docs live in `K2Bi-Vault/wiki/planning/`, not in the repo), there is nothing to stage; report the vault-side change to Keith by name and continue.
+
+When `.kimi/post-build-hook.sh` is absent, skip this step silently -- absence is the default and not an error. When the file exists but is not executable, surface a one-line warning to Keith and skip; do not chmod it on the fly.
+
 ### 5. Stage + commit + push
 
 Stage every file this session touched, regardless of category. The category table in step 1 is for `/sync` routing decisions, not for gating staging -- a touched file in `docs/`, `allhands/`, or any other uncategorized path still gets staged if it belongs to this session. Files in the working tree that predate the session and were not touched in this session must NOT be staged.
