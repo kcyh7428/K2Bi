@@ -1,3 +1,45 @@
+## 2026-04-26 -- minimax-review parser + validator hardened against malformed-success (P3 follow-up from m2.22 triage)
+
+**Commit:** `00b3953` fix(minimax-review): harden review-output parser + validator against malformed-success
+
+**What shipped:** Closes the P3 follow-up surfaced in the m2.22 SHIPPED entry below. When a Kimi response was even slightly off-shape (early `\`\`\`json` stub before the real review, partial parse, embedded quotes that broke nested JSON, NaN confidence, extra schema keys, etc.), the previous parser would silently return a partial dict, the previous top-level-only validator would accept it, `main()` would exit 0, and `review_runner.py`'s rc=0-only verdict-marker gate at lines 368-382 would suppress the secondary-reviewer fallback. Real findings dropped on the floor with no signal that anything was wrong.
+
+Two-layer fix:
+1. `extract_json_object` now enforces a "whole-response is a single review object" contract: explicit `\`\`\`json` fence with a word boundary (rejects `jsonc` / `json5` / `python` / untagged hijacks); single-fence-only (multiple json fences = ambiguous); whitespace required before the fence, between the tag and `{`, after the parsed object up to the closing fence, and after the closing fence; greedy first-`{` to last-`}` fallback only runs for completely fence-free responses, and only when the JSON object is the entire response (no surrounding prose).
+2. `is_valid_review_object` now mirrors `review-output.schema.json`: top-level required (verdict enum, non-empty summary, list findings, list next_steps); each finding required (severity enum, non-empty title/body/file, strict-int line_start/line_end >= 1, finite-number confidence in [0,1], recommendation string); `additionalProperties: false` enforced via exact key-set comparison at both levels; NaN / +Inf / -Inf confidence rejected (Python's `json.loads` accepts them by default; NaN bypasses range checks silently).
+
+`main()` treats schema-invalid parses as unparseable (stderr warning naming missing fields, exit 3, raw text still archived for forensics). Wrapper's existing `rc != 0` fallback in `run_fallback_chain` triggers normally.
+
+**Codex review:** 10 review rounds (R1-R10) via `scripts/review.sh diff`. Each round Codex found a more contrived malformed-success path; each fix was implemented test-first. Final R10 verdict: APPROVE -- "No ship blocker found in the R10 diff. The parser now rejects the malformed-success classes raised through R1-R10, and the validator closes the remaining schema-shape gaps before rc=0 can suppress fallback."
+
+| Round | Finding | Severity | Fix |
+|-------|---------|----------|-----|
+| R1    | top-level-only validation accepted `findings: [{}]` | high | nested per-finding required + non-empty title/body/file + strict-int line bounds + numeric confidence |
+| R2    | additionalProperties not enforced + NaN bypassed range check | high | exact key-set comparison + math.isfinite |
+| R3    | trailing garbage in fence accepted via raw_decode | high | trailing-whitespace check; reject when fence found but malformed |
+| R4    | `\`\`\`(?:json)?` matched python fences | high | require explicit `json` tag |
+| R5    | `\`\`\`json\s*` prefix-matched `jsonc` / `json5` | high | word-boundary `\b` |
+| R6    | first valid json fence won when later fence had real review | high | reject when multiple json fences |
+| R7    | greedy fallback parsed schema-stub from non-json fences | high | skip greedy if any backtick fence in text |
+| R8    | trailing prose after closing fence accepted | high | require post-fence + post-greedy whitespace |
+| R9    | leading prose before json fence + between tag and `{` | high | require pre-fence + intra-fence whitespace |
+| R10   | (final) | approve | no material findings |
+
+**Tests added:** 45 new in `tests/test_minimax_review_scope.py`. Targeted file green: 64/64.
+
+**Feature status change:** review-pipeline correctness gate hardened. The `scripts/review.sh` -> `scripts/lib/review_runner.py` -> `scripts/lib/minimax_review.py` chain can no longer rc=0 on a malformed Kimi response.
+
+**Follow-ups:** None. Codex flagged this as a deferred P3 in the m2.22 SHIPPED entry; this commit closes that thread.
+
+**Key decisions:**
+- Strict whole-response policy chosen over lenient "extract first valid review" because the threat model prefers false-negative (reject and retry on secondary reviewer) over false-positive (accept malformed and silently drop content).
+- `--no-feature` ship -- this is review-pipeline infrastructure, not a phase milestone or feature note.
+- m2.22 commits (9b0f0b3 + 3c98417 + dbee41f + 317cdba + 4edc67f) untouched, per the architect's parallel-session deferral instruction.
+
+**Related:** L-2026-04-26-002 (env-prefix gotcha that already touched the neighbour `scripts/review.sh`).
+
+---
+
 ## 2026-04-26 -- m2.22 Codex full-stack review SHIPPED -- closes Bundle 5 (5/5), unblocks Phase 3.10 burn-in window
 
 **Commits:** `9b0f0b3` fix(m2.22-review): F1-F4 + `3c98417` fix(m2.22-review-r2): N1+N2 + `dbee41f` fix(m2.22-review-r3): N3 + `317cdba` fix(m2.22-review-r4): N4
