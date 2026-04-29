@@ -82,6 +82,21 @@ def _make_default_input(symbol: str = "NVDA", ticker_type: str = "equity", **ove
     4 asymmetry scenarios summing to 1.00, three T1/T2/T3 targets
     summing to 100% sell_pct).
     """
+    verification = overrides.pop("verification", None)
+    if verification is None:
+        verification = it.Verification(
+            completed_at="2026-04-29T16:25:00+08:00",
+            claims=[
+                it.ClaimVerification(
+                    claim_id="bull-1-evidence",
+                    claim_text="Q3 2025 hyperscaler capex +47% YoY",
+                    claim_load_bearing=True,
+                    source_url="https://example.com/msft-capex",
+                    operator_check="verified",
+                ),
+            ],
+            status="pass",
+        )
     defaults = dict(
         symbol=symbol,
         ticker_type=ticker_type,
@@ -213,6 +228,7 @@ def _make_default_input(symbol: str = "NVDA", ticker_type: str = "equity", **ove
         secondary_entry_conservative="$660 -- pullback to 200-day MA",
         initial_stop_rationale="below the 200-day MA",
         trailing_stop_rationale="after T1 hits, move stop to breakeven",
+        verification=verification,
     )
     defaults.update(overrides)
     return it.ThesisInput(**defaults)
@@ -454,7 +470,7 @@ class SchemaValidityTests(_VaultTestBase):
             "exit_signals", "time_stop",
             "recommended_action", "conviction_band",
             "next_catalyst", "catalyst_timeline",
-            "ticker_type",
+            "ticker_type", "verification",
         }
         extra = set(fm.keys()) - allowed
         self.assertFalse(extra, f"unexpected frontmatter keys: {extra}")
@@ -1571,6 +1587,316 @@ class EmptyCatalystTimelineTests(_VaultTestBase):
         with self.assertRaises(ValueError) as cm:
             it.generate_thesis(ti, self.tmp_vault, now=self.today)
         self.assertIn("at least one", str(cm.exception).lower())
+
+
+# ---------- Phase 3.8.6 MVP-2: verification gate ----------
+
+
+class VerificationGateTests(_VaultTestBase):
+    """Five new test cases for the curated info set verification gate.
+    Covers PASS, OVERRIDE, REFUSE, ADVISORY-ONLY, and INVALID states.
+    """
+
+    def _make_verification(
+        self,
+        status: str,
+        claims: list[it.ClaimVerification],
+        override_reason: str | None = None,
+        refuse_reason: str | None = None,
+    ) -> it.Verification:
+        return it.Verification(
+            completed_at="2026-04-29T16:25:00+08:00",
+            claims=claims,
+            status=status,
+            override_reason=override_reason,
+            refuse_reason=refuse_reason,
+        )
+
+    def test_pass_all_load_bearing_verified(self) -> None:
+        """PASS case: all load-bearing claims verified → write succeeds;
+        frontmatter contains the verification block."""
+        v = self._make_verification(
+            status="pass",
+            claims=[
+                it.ClaimVerification(
+                    claim_id="bull-1-evidence",
+                    claim_text="Q3 2025 hyperscaler capex +47% YoY",
+                    claim_load_bearing=True,
+                    source_url="https://example.com/msft-capex",
+                    operator_check="verified",
+                ),
+                it.ClaimVerification(
+                    claim_id="phase-3-numeric-revenue",
+                    claim_text="Revenue growth 47% YoY Q3 2025",
+                    claim_load_bearing=True,
+                    source_url="https://example.com/nvda-10q",
+                    operator_check="verified",
+                ),
+            ],
+        )
+        ti = _make_default_input("NVDA", verification=v)
+        result = it.generate_thesis(ti, self.tmp_vault, now=self.today)
+        self.assertTrue(result.written)
+        fm = sf.parse((self.tmp_vault / "wiki/tickers/NVDA.md").read_bytes())
+        self.assertIn("verification", fm)
+        self.assertEqual(fm["verification"]["status"], "pass")
+        self.assertEqual(len(fm["verification"]["claims"]), 2)
+
+    def test_pass_with_mixed_verified_and_advisory(self) -> None:
+        """PASS with load-bearing verified + non-load-bearing advisory
+        → write succeeds; both claim types appear in frontmatter."""
+        v = self._make_verification(
+            status="pass",
+            claims=[
+                it.ClaimVerification(
+                    claim_id="bull-1-evidence",
+                    claim_text="Q3 2025 hyperscaler capex +47% YoY",
+                    claim_load_bearing=True,
+                    source_url="https://example.com/msft-capex",
+                    operator_check="verified",
+                ),
+                it.ClaimVerification(
+                    claim_id="color-commentary-1",
+                    claim_text="CEO tone was bullish on earnings call",
+                    claim_load_bearing=False,
+                    source_url=None,
+                    operator_check="advisory",
+                ),
+            ],
+        )
+        ti = _make_default_input("NVDA", verification=v)
+        result = it.generate_thesis(ti, self.tmp_vault, now=self.today)
+        self.assertTrue(result.written)
+        fm = sf.parse((self.tmp_vault / "wiki/tickers/NVDA.md").read_bytes())
+        self.assertEqual(fm["verification"]["status"], "pass")
+        self.assertEqual(len(fm["verification"]["claims"]), 2)
+
+    def test_override_one_load_bearing_refused(self) -> None:
+        """OVERRIDE case: one load-bearing claim refused BUT
+        status == operator-override with reason >= 20 chars → write
+        succeeds; frontmatter captures override."""
+        v = self._make_verification(
+            status="operator-override",
+            override_reason="Operator accepts risk of unverified claim",
+            claims=[
+                it.ClaimVerification(
+                    claim_id="bull-1-evidence",
+                    claim_text="Q3 2025 hyperscaler capex +47% YoY",
+                    claim_load_bearing=True,
+                    source_url="https://example.com/msft-capex",
+                    operator_check="verified",
+                ),
+                it.ClaimVerification(
+                    claim_id="bear-1-evidence",
+                    claim_text="Top-3 customers = 62% of DC revenue",
+                    claim_load_bearing=True,
+                    source_url="https://example.com/nvda-10q",
+                    operator_check="refused",
+                    operator_note="10-Q footnote missing from source",
+                ),
+            ],
+        )
+        ti = _make_default_input("NVDA", verification=v)
+        result = it.generate_thesis(ti, self.tmp_vault, now=self.today)
+        self.assertTrue(result.written)
+        fm = sf.parse((self.tmp_vault / "wiki/tickers/NVDA.md").read_bytes())
+        self.assertEqual(fm["verification"]["status"], "operator-override")
+        self.assertEqual(
+            fm["verification"]["override_reason"],
+            "Operator accepts risk of unverified claim",
+        )
+
+    def test_refuse_status_raises_before_write(self) -> None:
+        """REFUSE case: status == refuse with reason >= 20 chars →
+        validate_verification raises ValueError; no file written; no
+        glossary stubs appended."""
+        v = self._make_verification(
+            status="refuse",
+            refuse_reason="Unverified load-bearing claims cannot proceed",
+            claims=[
+                it.ClaimVerification(
+                    claim_id="bull-1-evidence",
+                    claim_text="Q3 2025 hyperscaler capex +47% YoY",
+                    claim_load_bearing=True,
+                    source_url="https://example.com/msft-capex",
+                    operator_check="refused",
+                    operator_note="Source does not contain this claim",
+                ),
+            ],
+        )
+        ti = _make_default_input("NVDA", verification=v)
+        with self.assertRaises(ValueError) as cm:
+            it.generate_thesis(ti, self.tmp_vault, now=self.today)
+        exc_text = str(cm.exception)
+        self.assertIn("verification gate refused", exc_text)
+        self.assertIn(
+            "Unverified load-bearing claims cannot proceed", exc_text
+        )
+        self.assertFalse(
+            (self.tmp_vault / "wiki/tickers/NVDA.md").exists(),
+            "file must not be written on refusal",
+        )
+
+    def test_advisory_only_non_load_bearing(self) -> None:
+        """ADVISORY-ONLY case: all load-bearing claims verified;
+        some non-load-bearing claims marked advisory; status == pass
+        → write succeeds."""
+        v = self._make_verification(
+            status="pass",
+            claims=[
+                it.ClaimVerification(
+                    claim_id="bull-1-evidence",
+                    claim_text="Q3 2025 hyperscaler capex +47% YoY",
+                    claim_load_bearing=True,
+                    source_url="https://example.com/msft-capex",
+                    operator_check="verified",
+                ),
+                it.ClaimVerification(
+                    claim_id="color-commentary-1",
+                    claim_text="CEO tone was bullish on earnings call",
+                    claim_load_bearing=False,
+                    source_url=None,
+                    operator_check="advisory",
+                ),
+            ],
+        )
+        ti = _make_default_input("NVDA", verification=v)
+        result = it.generate_thesis(ti, self.tmp_vault, now=self.today)
+        self.assertTrue(result.written)
+        fm = sf.parse((self.tmp_vault / "wiki/tickers/NVDA.md").read_bytes())
+        self.assertEqual(fm["verification"]["status"], "pass")
+
+    def test_invalid_load_bearing_refused_with_pass_status(self) -> None:
+        """INVALID case: load-bearing claim operator_check == refused
+        AND status == pass → raises ValueError (validator must catch
+        the contradiction)."""
+        v = self._make_verification(
+            status="pass",
+            claims=[
+                it.ClaimVerification(
+                    claim_id="bull-1-evidence",
+                    claim_text="Q3 2025 hyperscaler capex +47% YoY",
+                    claim_load_bearing=True,
+                    source_url="https://example.com/msft-capex",
+                    operator_check="refused",
+                    operator_note="Source does not contain this claim",
+                ),
+            ],
+        )
+        ti = _make_default_input("NVDA", verification=v)
+        with self.assertRaises(ValueError) as cm:
+            it.generate_thesis(ti, self.tmp_vault, now=self.today)
+        self.assertIn("pass", str(cm.exception).lower())
+        self.assertIn("load-bearing", str(cm.exception).lower())
+
+    def test_rejects_empty_claims_list(self) -> None:
+        """Empty claims list bypasses the gate → raise ValueError."""
+        v = self._make_verification(status="pass", claims=[])
+        ti = _make_default_input("NVDA", verification=v)
+        with self.assertRaises(ValueError) as cm:
+            it.generate_thesis(ti, self.tmp_vault, now=self.today)
+        self.assertIn("empty", str(cm.exception).lower())
+
+    def test_rejects_override_with_all_verified_claims(self) -> None:
+        """operator-override with no refused load-bearing claims is
+        meaningless audit noise → raise ValueError."""
+        v = self._make_verification(
+            status="operator-override",
+            override_reason="Operator accepts risk of unverified claim",
+            claims=[
+                it.ClaimVerification(
+                    claim_id="bull-1-evidence",
+                    claim_text="Q3 2025 hyperscaler capex +47% YoY",
+                    claim_load_bearing=True,
+                    source_url="https://example.com/msft-capex",
+                    operator_check="verified",
+                ),
+            ],
+        )
+        ti = _make_default_input("NVDA", verification=v)
+        with self.assertRaises(ValueError) as cm:
+            it.generate_thesis(ti, self.tmp_vault, now=self.today)
+        self.assertIn("operator-override", str(cm.exception).lower())
+        self.assertIn("load-bearing", str(cm.exception).lower())
+
+    def test_override_reason_19_chars_rejected(self) -> None:
+        v = self._make_verification(
+            status="operator-override",
+            override_reason="x" * 19,
+            claims=[
+                it.ClaimVerification(
+                    claim_id="bull-1-evidence",
+                    claim_text="Q3 2025 hyperscaler capex +47% YoY",
+                    claim_load_bearing=True,
+                    source_url="https://example.com/msft-capex",
+                    operator_check="refused",
+                    operator_note="Source does not contain this claim",
+                ),
+            ],
+        )
+        ti = _make_default_input("NVDA", verification=v)
+        with self.assertRaises(ValueError) as cm:
+            it.generate_thesis(ti, self.tmp_vault, now=self.today)
+        self.assertIn("override_reason", str(cm.exception).lower())
+
+    def test_override_reason_20_chars_accepted(self) -> None:
+        v = self._make_verification(
+            status="operator-override",
+            override_reason="x" * 20,
+            claims=[
+                it.ClaimVerification(
+                    claim_id="bull-1-evidence",
+                    claim_text="Q3 2025 hyperscaler capex +47% YoY",
+                    claim_load_bearing=True,
+                    source_url="https://example.com/msft-capex",
+                    operator_check="refused",
+                    operator_note="Source does not contain this claim",
+                ),
+            ],
+        )
+        ti = _make_default_input("NVDA", verification=v)
+        result = it.generate_thesis(ti, self.tmp_vault, now=self.today)
+        self.assertTrue(result.written)
+
+    def test_refuse_reason_19_chars_rejected(self) -> None:
+        v = self._make_verification(
+            status="refuse",
+            refuse_reason="x" * 19,
+            claims=[
+                it.ClaimVerification(
+                    claim_id="bull-1-evidence",
+                    claim_text="Q3 2025 hyperscaler capex +47% YoY",
+                    claim_load_bearing=True,
+                    source_url="https://example.com/msft-capex",
+                    operator_check="refused",
+                    operator_note="Source does not contain this claim",
+                ),
+            ],
+        )
+        ti = _make_default_input("NVDA", verification=v)
+        with self.assertRaises(ValueError) as cm:
+            it.generate_thesis(ti, self.tmp_vault, now=self.today)
+        self.assertIn("refuse_reason", str(cm.exception).lower())
+
+    def test_refuse_reason_20_chars_accepted(self) -> None:
+        v = self._make_verification(
+            status="refuse",
+            refuse_reason="x" * 20,
+            claims=[
+                it.ClaimVerification(
+                    claim_id="bull-1-evidence",
+                    claim_text="Q3 2025 hyperscaler capex +47% YoY",
+                    claim_load_bearing=True,
+                    source_url="https://example.com/msft-capex",
+                    operator_check="refused",
+                    operator_note="Source does not contain this claim",
+                ),
+            ],
+        )
+        ti = _make_default_input("NVDA", verification=v)
+        with self.assertRaises(ValueError) as cm:
+            it.generate_thesis(ti, self.tmp_vault, now=self.today)
+        self.assertIn("verification gate refused", str(cm.exception))
 
 
 if __name__ == "__main__":

@@ -34,6 +34,39 @@ Ticker-level research thesis with structured signals for the approval flow. Read
    - Any investor deck URL or analyst rebuttal Keith wants in scope.
    Then invoke `/research --sources <urls>` to pull the content. `/research` is the Phase 2 MVP data ground -- NBLM promotion is Phase 4 conditional per [[nblm-mvp]].
 
+3a. **Verify load-bearing claims from the curated info set.** This gate exists because the 2026-04-27 pre-approval audit found un-grounded assertions flowing into thesis_score reasoning, bear_case evidence, and fundamental sub-score inputs (see L-2026-04-27-004).
+
+    **Load-bearing claim definition (tight scope):**
+    - Anything that becomes a kill_criterion-equivalent: `entry_invalidation` entries, `exit_signals` entries.
+    - `thesis_score` reasoning inputs: any factual basis for the 5 sub-scores (`catalyst_clarity`, `asymmetry`, `timeline_precision`, `edge_identification`, `conviction_level`).
+    - `fundamental_sub_scores` reasoning inputs: any factual basis for the 5 fundamental sub-scores.
+    - Named-numerics in the phase prose (`phase_1_business_model`, `phase_2_competitive_moat`, `phase_3_financial_quality`, `phase_4_risks_valuation`): a specific quoted number like "+27% YoY" or "$280M revenue", NOT generic descriptive prose.
+    - `bull_reasons[].evidence` and `bear_reasons[].evidence` (these explicitly cite sources).
+    - `next_catalyst.event` and `next_catalyst.expected_impact`.
+    - `catalyst_timeline[].event` (each row).
+    - `asymmetry_scenarios[].target` when target is justified by a source-based claim, not pure technical derivation.
+
+    Anything else (descriptive prose without specific numerics, secondary context, color commentary) is **advisory** -- listed for operator awareness but not blocking.
+
+    **Per-claim operator checklist:**
+    1. Source URL resolves (manual click or programmatic check).
+    2. The source CONTENT'S FRAMING of the claim matches what's in the curated info set. Operator reads the source page and confirms. URL existence alone is INSUFFICIENT -- the lesson from the FCC scrutiny example is that a real URL pointing to a routine product certification can be mis-characterized as "scrutiny" in the curated text.
+    3. Mark `operator_check`: `verified` | `refused` | `override` | `advisory`.
+    4. If `refused` or `override`: write `operator_note` (>= 20 chars) explaining.
+
+    **Optional LLM spot-check backstop:** for paywalled or long-document claims the operator cannot read manually. Use a single-call check. The spot-check vendor MUST differ from the curated info set's producer (compound-bias mitigation). Result feeds the operator's decision but does NOT auto-decide.
+
+    **Aggregate decision:**
+    - `pass` if all load-bearing claims are verified.
+    - `operator-override` if some load-bearing claims are refused but the operator accepts the risk in writing (reason >= 20 chars).
+    - `refuse` if the operator declines to override.
+
+    **Refusal path:** if any load-bearing claim fails verification AND no operator override is provided, `generate_thesis` raises `ValueError`; no `wiki/tickers/<SYMBOL>.md` is produced. The operator returns to the curated info set to correct, or accepts and overrides explicitly.
+
+    **Override path:** written reason >= 20 chars; reason captured in thesis frontmatter under the new `verification:` block for audit trail.
+
+    Cross-link: `K2Bi-Vault/System/memory/self_improve_learnings.md` L-2026-04-27-004.
+
 4. **Run Ahern 4-phase analysis** on the gathered material:
    - **Phase 1: Business Model** -- revenue split, segments, pricing power, customer concentration, TAM.
    - **Phase 2: Competitive Position / Moat** -- moat type (network effects / switching costs / IP / brand / scale), market share, challengers.
@@ -114,6 +147,19 @@ ti = it.ThesisInput(
     phase_2_competitive_moat='...',
     phase_3_financial_quality='...',
     phase_4_risks_valuation='...',
+    verification=it.Verification(
+        completed_at='2026-04-29T16:25:00+08:00',
+        claims=[
+            it.ClaimVerification(
+                claim_id='bull-1-evidence',
+                claim_text='Q3 2025 hyperscaler capex +47% YoY',
+                claim_load_bearing=True,
+                source_url='https://example.com/msft-capex',
+                operator_check='verified',
+            ),
+        ],
+        status='pass',
+    ),
     primary_entry_rationale='\$700 -- 50MA support + volume shelf',
     secondary_entry_aggressive='\$720 -- breakout',
     secondary_entry_conservative='\$660 -- 200MA pullback',

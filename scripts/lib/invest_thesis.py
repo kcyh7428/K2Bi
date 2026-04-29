@@ -41,6 +41,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import yaml
 
@@ -215,6 +216,34 @@ class AsymmetryScenario:
 
 
 @dataclass
+class ClaimVerification:
+    """One load-bearing claim from the curated info set with operator
+    verification status. Part of the Phase 3.8.6 MVP-2 verification gate.
+    """
+
+    claim_id: str
+    claim_text: str
+    claim_load_bearing: bool
+    source_url: Optional[str]
+    operator_check: str
+    operator_note: Optional[str] = None
+
+
+@dataclass
+class Verification:
+    """Aggregate verification result for a thesis input.
+
+    status: "pass" | "operator-override" | "refuse"
+    """
+
+    completed_at: str
+    claims: list[ClaimVerification]
+    status: str
+    override_reason: Optional[str] = None
+    refuse_reason: Optional[str] = None
+
+
+@dataclass
 class ThesisInput:
     """Complete structured input to invest_thesis.generate_thesis.
 
@@ -253,6 +282,8 @@ class ThesisInput:
     phase_2_competitive_moat: str
     phase_3_financial_quality: str
     phase_4_risks_valuation: str
+
+    verification: Verification
 
     primary_entry_rationale: str
     secondary_entry_aggressive: Optional[str] = None
@@ -583,6 +614,124 @@ def validate_dates(ti: "ThesisInput") -> None:
         _validate_iso_date_string(
             f"catalyst_timeline[{i}].date", entry.date
         )
+
+
+# ---------- verification gate (Phase 3.8.6 MVP-2) ----------
+
+
+ALLOWED_OPERATOR_CHECKS = frozenset({"verified", "refused", "override", "advisory"})
+ALLOWED_LOAD_BEARING_CHECKS = frozenset({"verified", "refused", "override"})
+ALLOWED_VERIFICATION_STATUSES = frozenset({"pass", "operator-override", "refuse"})
+MIN_REASON_LEN = 20
+
+
+def validate_verification(v: Verification) -> None:
+    """Enforce the verification gate matrix from .kimi/job.md SECTION B.
+
+    Raises ValueError on any violation. On ``status == "refuse"`` the
+    raise message includes ``refuse_reason`` so the caller can log it.
+    """
+    if v.status not in ALLOWED_VERIFICATION_STATUSES:
+        raise ValueError(
+            f"verification.status {v.status!r} not in allowed enum "
+            f"{sorted(ALLOWED_VERIFICATION_STATUSES)}"
+        )
+
+    seen_ids: set[str] = set()
+    for c in v.claims:
+        if c.claim_id in seen_ids:
+            raise ValueError(
+                f"duplicate claim_id in verification.claims: {c.claim_id!r}"
+            )
+        seen_ids.add(c.claim_id)
+        if c.operator_check not in ALLOWED_OPERATOR_CHECKS:
+            raise ValueError(
+                f"claim {c.claim_id!r} operator_check {c.operator_check!r} "
+                f"not in allowed enum {sorted(ALLOWED_OPERATOR_CHECKS)}"
+            )
+        if c.claim_load_bearing and c.operator_check not in ALLOWED_LOAD_BEARING_CHECKS:
+            raise ValueError(
+                f"claim {c.claim_id!r} is load-bearing but operator_check "
+                f"{c.operator_check!r} is not valid for load-bearing claims "
+                f"(must be one of {sorted(ALLOWED_LOAD_BEARING_CHECKS)})"
+            )
+        if c.operator_check in {"refused", "override"}:
+            if not c.operator_note or len(c.operator_note) < MIN_REASON_LEN:
+                raise ValueError(
+                    f"claim {c.claim_id!r} operator_check={c.operator_check!r} "
+                    f"requires operator_note >= {MIN_REASON_LEN} chars, got "
+                    f"{len(c.operator_note or '')!r}"
+                )
+
+    # The gate requires at least one claim to be enumerated; an empty
+    # list would bypass the verification step entirely.
+    if not v.claims:
+        raise ValueError("verification.claims must not be empty")
+
+    # completed_at must be a valid ISO-8601 datetime string
+    try:
+        _dt.datetime.fromisoformat(v.completed_at)
+    except ValueError as exc:
+        raise ValueError(
+            f"verification.completed_at must be ISO-8601 datetime, "
+            f"got {v.completed_at!r}: {exc}"
+        ) from exc
+
+    # source_url format validation (when present)
+    for c in v.claims:
+        if c.source_url is not None:
+            parsed = urlparse(c.source_url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError(
+                    f"claim {c.claim_id!r} source_url must be HTTP/HTTPS "
+                    f"with a non-empty host, got {c.source_url!r}"
+                )
+
+    if v.status == "refuse":
+        if not v.refuse_reason or len(v.refuse_reason) < MIN_REASON_LEN:
+            raise ValueError(
+                f"verification.status == 'refuse' requires refuse_reason "
+                f">= {MIN_REASON_LEN} chars, got "
+                f"{len(v.refuse_reason or '')!r}"
+            )
+        raise ValueError(
+            f"verification gate refused: {v.refuse_reason}"
+        )
+
+    if v.status == "operator-override":
+        if not v.override_reason or len(v.override_reason) < MIN_REASON_LEN:
+            raise ValueError(
+                f"verification.status == 'operator-override' requires "
+                f"override_reason >= {MIN_REASON_LEN} chars, got "
+                f"{len(v.override_reason or '')!r}"
+            )
+
+    # status == "pass" or "operator-override" -- check load-bearing constraint
+    load_bearing_claims = [c for c in v.claims if c.claim_load_bearing]
+    bad_load_bearing = [
+        c for c in load_bearing_claims
+        if c.operator_check in {"refused", "advisory"}
+    ]
+
+    if v.status == "pass" and bad_load_bearing:
+        ids = [c.claim_id for c in bad_load_bearing]
+        raise ValueError(
+            f"verification.status == 'pass' but load-bearing claims "
+            f"have operator_check in {{refused, advisory}}: {ids}"
+        )
+
+    if v.status == "operator-override":
+        # operator-override requires at least one load-bearing claim to
+        # actually be refused; advisory is not a valid resolution for
+        # load-bearing claims.
+        refused_load_bearing = [
+            c for c in load_bearing_claims if c.operator_check == "refused"
+        ]
+        if not refused_load_bearing:
+            raise ValueError(
+                "verification.status == 'operator-override' requires at "
+                "least one load-bearing claim with operator_check == 'refused'"
+            )
 
 
 # ---------- conviction band ----------
@@ -952,6 +1101,31 @@ def _assemble_body(ti: ThesisInput, learning_stage: str) -> str:
 # ---------- frontmatter assembly ----------
 
 
+def _build_verification_frontmatter(v: Verification) -> dict[str, Any]:
+    """Emit the verification block for frontmatter. Both reason fields
+    are always emitted (as null when not applicable) so downstream
+    parsers have a stable schema. Note: ``status == 'refuse'`` raises
+    before any write, so persisted frontmatter will never contain
+    ``status: refuse``."""
+    return {
+        "status": v.status,
+        "completed_at": v.completed_at,
+        "override_reason": v.override_reason,
+        "refuse_reason": v.refuse_reason,
+        "claims": [
+            {
+                "claim_id": c.claim_id,
+                "claim_text": c.claim_text,
+                "claim_load_bearing": c.claim_load_bearing,
+                "source_url": c.source_url,
+                "operator_check": c.operator_check,
+                "operator_note": c.operator_note,
+            }
+            for c in v.claims
+        ],
+    }
+
+
 def _build_frontmatter(
     ti: ThesisInput,
     now: _dt.date,
@@ -997,6 +1171,7 @@ def _build_frontmatter(
         "next_catalyst": asdict(ti.next_catalyst),
         "catalyst_timeline": [asdict(c) for c in ti.catalyst_timeline],
         "ticker_type": ti.ticker_type,
+        "verification": _build_verification_frontmatter(ti.verification),
     }
 
 
@@ -1242,6 +1417,7 @@ def generate_thesis(
     validate_next_catalyst_is_soonest(
         thesis_input.next_catalyst, thesis_input.catalyst_timeline
     )
+    validate_verification(thesis_input.verification)
 
     if now is None:
         now = _dt.date.today()

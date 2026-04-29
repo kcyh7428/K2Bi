@@ -1,3 +1,28 @@
+## 2026-04-29 -- Phase 3.8.6 MVP-2: invest-thesis curated info set verification gate
+
+**Commit:** `PENDING`
+
+**Triggered by:** 2026-04-27 pre-approval audit (`K2Bi-Vault/wiki/insights/2026-04-27_phase-3.8-pre-approval-audit.md`) found un-grounded assertions flowing into `bear_reasons` evidence, `fundamental_sub_scores` reasoning, and `bear_case` verdict input with no verification step. L-2026-04-27-004 mandates primary-source verification for every load-bearing claim before it becomes thesis input.
+
+**What shipped:**
+- `invest-thesis/SKILL.md` -- new pipeline step 3a inserted between source-gathering (step 3) and Ahern-analysis (step 4). Defines tight load-bearing scope: kill_criterion-equivalents, thesis/bear/fundamental score inputs, named-numerics in phase prose, bull/bear evidence, next_catalyst, catalyst_timeline, asymmetry targets. Documents per-claim operator checklist (URL resolves + content framing matches), optional LLM spot-check backstop (vendor must differ from curated info set producer), refusal path, and override path (reason >= 20 chars).
+- `scripts/lib/invest_thesis.py` -- `ClaimVerification` + `Verification` dataclasses; `validate_verification` enforces: non-empty claims, unique claim_ids, ISO-8601 `completed_at`, HTTP/HTTPS `source_url` with non-empty host, per-claim `operator_note >= 20` chars for `refused`/`override`, `pass` requires all load-bearing claims `verified`, `operator-override` requires at least one load-bearing `refused` claim + `override_reason >= 20`, `refuse` raises before any write with `refuse_reason >= 20`. Frontmatter emits stable `verification:` block with all claim fields.
+- `tests/test_invest_thesis.py` -- 11 verification gate tests (originally 5 per spec, expanded to 11 during adversarial review): PASS all-verified, PASS mixed verified+advisory, OVERRIDE with refused claim, REFUSE raises before write, INVALID load-bearing refused+pass, empty claims rejected, override without refused rejected, 19-char override reason rejected, 20-char override reason accepted, 19-char refuse reason rejected, 20-char refuse reason accepted.
+- Feature note: `K2Bi-Vault/wiki/planning/feature_phase-3.8.6-mvp-2-thesis-verification-gate.md`.
+
+**Tests:** 1353 passed, 1 skipped, 0 failed (was 1349 baseline; +4 new verification tests).
+
+**Adversarial review:** Codex unreachable (EISDIR on `.claude/worktrees/suspicious-rhodes-48299c`). Fallback to Kimi-backed reviewer via `scripts/minimax-review.sh` (Kimi-for-coding API, separate process from build agent). Three review rounds; findings addressed:
+- R1: empty claims bypass (fixed), operator-override without refused (fixed), refuse_reason length check kept per spec matrix, frontmatter null leak fixed by conditional emit then reverted to always-emit for schema stability.
+- R2: per-claim operator_note length not enforced (fixed), frontmatter omitting nulls (accepted, always emit), REFUSE assertion tightened (fixed), validation ordering before freshness (verified correct by code inspection).
+- R3: advisory on load-bearing narrowed to rejected (fixed), ISO-8601 datetime validation added, URL format validation added, boundary tests for 19/20 chars added, claim_id uniqueness check added, mixed verified+advisory PASS test added.
+
+**Out of scope (MVP-2 scope lock honored):** No invest-strategy / invest-bear-case / invest-narrative / invest-screen / CALX work / active_rules.md / other skill bodies touched.
+
+**Next:** MVP-3 (forward-guidance prompt at bucket-rule lock-time) ships next.
+
+---
+
 ## 2026-04-26 -- Phase 3.8.5 invest-narrative durable fixes A-E + OpenAI timeout fix (Ship 2 hardening)
 
 **Commit:** `5647e1d` feat(invest-narrative): Phase 3.8.5 durable fixes A-E + OpenAI timeout fix
