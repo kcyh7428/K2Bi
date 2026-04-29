@@ -1,6 +1,6 @@
 ## 2026-04-29 -- Phase 3.8.6 MVP-2: invest-thesis curated info set verification gate
 
-**Commit:** `PENDING`
+**Commit:** `770bece`
 
 **Triggered by:** 2026-04-27 pre-approval audit (`K2Bi-Vault/wiki/insights/2026-04-27_phase-3.8-pre-approval-audit.md`) found un-grounded assertions flowing into `bear_reasons` evidence, `fundamental_sub_scores` reasoning, and `bear_case` verdict input with no verification step. L-2026-04-27-004 mandates primary-source verification for every load-bearing claim before it becomes thesis input.
 
