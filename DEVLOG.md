@@ -1,3 +1,27 @@
+## 2026-04-30 -- Phase 3.8.6 MVP-3 P2 follow-up: enforce waive contract in forward-guidance validator
+
+**Commit:** `PENDING`
+
+**Triggered by:** Codex retroactive review on 2026-04-30 of MVP-3 (commit `33b9ba5`) surfaced a semantic gap in the `waive` branch of `validate_forward_guidance_check` at `scripts/lib/strategy_frontmatter.py`. The validator only checked `waive_reason` length and did NOT enforce the spec's "thresholded_metrics empty OR all 'no quantitative guide given'" contract. An operator could set `status=waive` with metrics carrying `sits_inside_guide=true` and pass approval, defeating the structured-justification design that drove MVP-3 in the first place.
+
+**What shipped:**
+- `scripts/lib/strategy_frontmatter.py` -- waive branch in `validate_forward_guidance_check` extended after the existing reason-length check. New filter computes `non_waiveable = [tm for tm in fgc.thresholded_metrics if tm.guide_range_text.strip().lower() != "no quantitative guide given"]`; if non-empty, raises ValueError naming the offending metrics. `.strip().lower()` is intentional -- accepts capitalisation/whitespace variants of the sentinel phrase.
+- `tests/test_strategy_frontmatter.py` -- new test `test_waive_with_quantitative_guide_metrics_refuses` in `ForwardGuidanceValidateTests` exercises the bug. Verified TDD-style: test FAILED pre-validator-fix (proving it exercises the new logic), PASSED post-fix.
+
+**Tests:** 1380 passed, 1 skipped, 0 failed (was 1353 baseline at MVP-2 entry; +1 new from this P2 + intermediate ships). Forward-guidance subset: 18 (9 extract + 9 validate, was 17).
+
+**Adversarial review:** Codex PASS. No P0 / P1 findings. One P3 nit deferred (add a positive coverage test for the non-empty all-sentinel `"no quantitative guide given"` waive allow-path; outside the user's "address P0/P1 inline" scope for this chip). Codex confirmed `.strip().lower()` is sufficient since the sentinel is ASCII and mismatches fail closed rather than bypass. Self-review prohibited per L-2026-04-30-001 -- Codex was the independent gate.
+
+**Out of scope:**
+- `invest-ship/SKILL.md` -- schema docs already say "Empty list OR all 'no quantitative guide given'"; no doc change needed.
+- Existing strategy specs -- grandfathered.
+- The `waive_reason` length check -- preserved as-is.
+- Other validator branches (`pass`, `override`) -- correct, untouched.
+
+**Cross-link:** L-2026-04-30-001 (operator-override pattern) shipped in parallel chip 2 (commit `d0d271c`). Together with chip 1 (rename `invest-strategy` -> `invest-ship` in policy-ledger), this completes the 3-chip 2026-04-30 P2 sweep.
+
+---
+
 ## 2026-04-29 -- Phase 3.8.6 MVP-2: invest-thesis curated info set verification gate
 
 **Commit:** `770bece`

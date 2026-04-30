@@ -484,6 +484,17 @@ def validate_forward_guidance_check(fgc: ForwardGuidanceCheck | None) -> None:
                 f"forward_guidance_check.status == 'waive' requires "
                 f"waive_reason >= {MIN_FGC_REASON_LEN} chars, got {len(reason)}"
             )
+        non_waiveable = [
+            tm for tm in fgc.thresholded_metrics
+            if tm.guide_range_text.strip().lower() != "no quantitative guide given"
+        ]
+        if non_waiveable:
+            raise ValueError(
+                f"forward_guidance_check.status == 'waive' requires either an empty "
+                f"thresholded_metrics list OR every entry's guide_range_text to be "
+                f"'no quantitative guide given'; found {len(non_waiveable)} entries "
+                f"with quantitative guide: {[tm.metric for tm in non_waiveable]}"
+            )
         return
 
 

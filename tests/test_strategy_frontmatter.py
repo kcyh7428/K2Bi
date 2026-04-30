@@ -1091,6 +1091,33 @@ class ForwardGuidanceValidateTests(unittest.TestCase):
         self.assertIn("waive", str(cm.exception))
         self.assertIn("20", str(cm.exception))
 
+    def test_waive_with_quantitative_guide_metrics_refuses(self):
+        """status='waive' must reject thresholded_metrics with quantitative guides.
+
+        The waive contract is 'no published guide applies'; entries with concrete
+        guide ranges contradict that aggregate state. P2 follow-up to MVP-3
+        (commit 33b9ba5) Codex review finding.
+        """
+        fgc = sf.ForwardGuidanceCheck(
+            completed_at="2026-04-30T10:00:00+08:00",
+            status="waive",
+            override_reason=None,
+            waive_reason="testing waive with mixed metric states for validator hardening",
+            thresholded_metrics=[
+                sf.ThresholdedMetric(
+                    metric="GM TTM",
+                    locked_threshold_text="<56% triggers bucket-4 EXIT",
+                    guide_source_text="Q1 2026 transcript published 2026-04-21",
+                    guide_range_text="54.25%-57.25%",
+                    sits_inside_guide=True,
+                    operator_note=None,
+                )
+            ],
+        )
+        with self.assertRaises(ValueError) as cm:
+            sf.validate_forward_guidance_check(fgc)
+        self.assertIn("quantitative guide", str(cm.exception))
+
     def test_missing_block_refuses(self):
         with self.assertRaises(ValueError) as cm:
             sf.validate_forward_guidance_check(None)
