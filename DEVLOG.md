@@ -1800,7 +1800,7 @@ feat(risk): belt-and-suspenders kill.flag alias alongside canonical `.killed`.
 
 ## 2026-04-30 -- Memory: L-2026-04-30-001 + 1 policy guard (operator-override-as-default pattern)
 
-**Commit:** `PENDING` memory: L-2026-04-30-001 + policy guard (operator-override pattern)
+**Commit:** `d0d271c` memory: L-2026-04-30-001 + policy guard (operator-override pattern)
 
 **What shipped:**
 - Appended L-2026-04-30-001 to `K2Bi-Vault/System/memory/self_improve_learnings.md` (lines 136-150 post-append, file size 134 -> 151 lines): "Verification gates with operator-override escape hatches collapse to override-as-default" (area: preferences, confidence: medium).
