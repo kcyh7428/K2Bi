@@ -1,6 +1,6 @@
 ## 2026-04-30 -- Phase 3.8.6 MVP-3 P2 follow-up: enforce waive contract in forward-guidance validator
 
-**Commit:** `PENDING`
+**Commit:** `3afe57f`
 
 **Triggered by:** Codex retroactive review on 2026-04-30 of MVP-3 (commit `33b9ba5`) surfaced a semantic gap in the `waive` branch of `validate_forward_guidance_check` at `scripts/lib/strategy_frontmatter.py`. The validator only checked `waive_reason` length and did NOT enforce the spec's "thresholded_metrics empty OR all 'no quantitative guide given'" contract. An operator could set `status=waive` with metrics carrying `sits_inside_guide=true` and pass approval, defeating the structured-justification design that drove MVP-3 in the first place.
 
