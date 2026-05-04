@@ -87,6 +87,29 @@ ADOPT_ORPHAN_STOP_ENV = "K2BI_ADOPT_ORPHAN_STOP"
 # calendar day covers overnight crashes; longer outages trip the
 # weekly_cap breaker first anyway.
 DEFAULT_LOOKBACK = timedelta(hours=48)
+# Q42 +1 week persistence FAIL (2026-05-03) carry-forward fix:
+# state-checkpoint events MUST survive multi-day engine-off gaps so a
+# cold-start after >48h doesn't re-flag previously-adopted positions
+# / orphan STOPs as phantoms. 30 days covers any plausible operator-
+# attended outage window without unbounded scan growth (each day file
+# is small KB-scale; checkpoint events are sparse). Recovery REPLAY
+# semantics are unchanged -- the existing _positions_from_journal
+# snapshot-reset and _adopted_orphan_perm_ids extraction handle older
+# events correctly once they are present in journal_tail. Only the
+# LOOKUP WINDOW for the two checkpoint event types widens. See
+# K2Bi-Vault/wiki/planning/q42-carryforward-fix-kickoff.md.
+EXTENDED_CHECKPOINT_LOOKBACK = timedelta(days=30)
+# Event types whose payload represents a state checkpoint that must
+# survive multi-day engine-off gaps. Limited to these two because they
+# are the only journal events that encode broker-side state the
+# architect has already adopted: engine_recovered.adopted_positions
+# (post-recovery snapshot) and orphan_stop_adopted (per-permId
+# adoption). Other events (order_filled, recovery_reconciled) are
+# intermediate transitions whose effect is already absorbed by
+# engine_recovered's snapshot-reset semantics on the next cold start.
+EXTENDED_CHECKPOINT_EVENT_TYPES: frozenset[str] = frozenset(
+    {"engine_recovered", "orphan_stop_adopted"}
+)
 
 
 @dataclass(frozen=True)
@@ -149,11 +172,14 @@ def _adopted_orphan_perm_ids(records: Iterable[dict[str, Any]]) -> set[str]:
     so they collide cleanly with the `f"perm:{...}"` namespace used
     throughout reconcile().
 
-    NOTE: bounded by journal_tail's lookback window (currently 48h via
-    DEFAULT_LOOKBACK). Long-tail carry-forward via engine_recovered
-    checkpoint is Phase 4+ work; in practice the VPS engine restarts
-    continuously so adopted permIds stay in tail. See DEVLOG Q42 for
-    the long-tail caveat and Phase 4+ home.
+    NOTE: bounded by journal_tail's lookback window. The Q42 +1 week
+    carry-forward fix (2026-05-03) extends the lookup window via
+    `_read_extended_checkpoints` for these events specifically, so
+    adoptions survive multi-day engine-off gaps. The recognition is
+    GATED on the underlying position still being held at the broker
+    -- see `_adopted_orphan_perm_id_to_ticker` and the call site in
+    `reconcile()` -- so a stale adoption whose position has since
+    been closed does NOT suppress phantom_open_order detection.
     """
     out: set[str] = set()
     for rec in records:
@@ -163,6 +189,42 @@ def _adopted_orphan_perm_ids(records: Iterable[dict[str, Any]]) -> set[str]:
         perm = payload.get("permId")
         if perm is not None:
             out.add(str(perm))
+    return out
+
+
+def _adopted_orphan_perm_id_to_ticker(
+    records: Iterable[dict[str, Any]],
+) -> dict[str, str]:
+    """Map adopted-orphan permId -> ticker from orphan_stop_adopted events.
+
+    Q42 +1 week carry-forward review (2026-05-03, Kimi+Codex
+    cross-mode): the original Q42 recognition unconditionally
+    suppressed `phantom_open_order` for any permId in
+    `_adopted_orphan_perm_ids`. With the carry-forward fix extending
+    the lookup to 30 days, a stale adoption could mask a genuinely-
+    orphaned STOP whose underlying position has been closed in the
+    interim. The reconcile() call site uses this mapping to gate the
+    suppression: an adopted permId is only honored when the broker
+    still holds a position in the order's ticker.
+
+    Same fix tightens the existing narrow-window path too -- the gap
+    was always present, the carry-forward just widened the time
+    window over which it could manifest.
+
+    Returns dict[permId_str -> ticker]. Multiple records for the same
+    permId would be unusual (operator should adopt at most once per
+    orphan), but if present the LATEST event's ticker wins via the
+    natural dict-overwrite semantics during forward replay.
+    """
+    out: dict[str, str] = {}
+    for rec in records:
+        if rec.get("event_type") != "orphan_stop_adopted":
+            continue
+        payload = rec.get("payload") or {}
+        perm = payload.get("permId")
+        ticker = payload.get("ticker")
+        if perm is not None and ticker:
+            out[str(perm)] = str(ticker)
     return out
 
 
@@ -295,9 +357,25 @@ def reconcile(
     # Q42: orphan_stop_adopted events from prior recovery passes pre-mark
     # their permIds as known so the Phase B.1 orphan loop skips them.
     # Same recognition mechanism Phase A's perm/oid matching uses.
-    # Bounded by journal_tail's 48h lookback; see _adopted_orphan_perm_ids
-    # docstring for the long-tail caveat.
+    # Q42 +1 week carry-forward (2026-05-03) extends the lookup window
+    # via `_read_extended_checkpoints` so multi-day engine-off gaps
+    # don't re-flag adopted orphans as phantoms. Capital-path safety
+    # gate per cross-mode adversarial review (Kimi + Codex 2026-05-03):
+    # an adopted permId only suppresses phantom_open_order when the
+    # broker STILL HOLDS a position in the order's ticker. A stale
+    # adoption whose underlying position has been closed must fall
+    # through to phantom detection -- the orphan STOP would otherwise
+    # be live at the broker without an associated long position to
+    # protect, and engine state cannot reason about it safely.
+    adopted_perm_to_ticker = _adopted_orphan_perm_id_to_ticker(journal_tail)
+    broker_position_tickers = {p.ticker for p in broker_positions}
     for adopted_perm in _adopted_orphan_perm_ids(journal_tail):
+        ticker = adopted_perm_to_ticker.get(str(adopted_perm))
+        if ticker is not None and ticker not in broker_position_tickers:
+            # Stale orphan adoption: ticker no longer at broker.
+            # Skip the carry-forward; phantom_open_order will fire
+            # for the live STOP order and surface the divergence.
+            continue
         seen_broker_ids.add(f"perm:{adopted_perm}")
     # Per-ticker (signed_qty_delta, last_broker_avg_fill_price).
     # Positive qty means the pending was a buy that filled, growing
