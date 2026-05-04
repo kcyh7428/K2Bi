@@ -1,3 +1,31 @@
+## 2026-05-04 -- invest-coach Phase 3.8a ships
+
+**Commit:** `4f8bcd5`
+
+**Triggered by:** K2B architect session 2026-05-04. Phase 3.8a build `invest-coach` (multi-turn coaching skill) completed after 9 adversarial review cycles.
+
+**What shipped:**
+- `.claude/skills/invest-coach/SKILL.md` -- multi-turn skill definition (T0-T13 + optional T5.5, Teach Mode integration with novice/intermediate/advanced dials, pause-or-generate table per turn)
+- `scripts/lib/invest_coach.py` -- 791-line Python compute module: T5.5 research prompt composer + vendor response ingestor; T6 subsection atomic-write helper; T7 verifier with full verification matrix (pass / operator-override / refuse) and vendor-warning surface; T11 forward-guidance assembler; T12 final-summary renderer; stage-advancement reflection with flock CAS guard; D7 feedback capture wiring
+- `scripts/lib/invest_coach_schemas.py` -- frontmatter validators for lived-signal and vendor_provenance blocks
+- `tests/test_invest_coach.py` -- 58 tests across all 11 MVP gates + sub-tests 11a/11b/11c + schema validation tests
+- `.claude/skills/invest-feedback/SKILL.md` -- `capture_coach_rejection` entry point for D7 auto-capture
+- `wiki/concepts/feature_invest-coach.md` -- feature note with binary MVP test + deferred follow-ups section
+
+**Review trail:**
+- Cycle 1: Codex original review → HIGH finding on T7 aggregation (unknown operator_check fell through to status="pass")
+- Cycle 2: Codex Agent re-review → verified HIGH closed; surfaced MEDIUM (isinstance(str) on override_reason) + LOW (TypeError→ValueError on unhashable operator_check)
+- Cycles 3-5: Kimi fast-pass → docstring inversion, whitespace bypass, schema/runtime mismatch, path traversal, lock file growth
+- Cycles 6-8: Kimi re-reviews → lock race, TOCTOU, allowlist tightening, inline read under lock, expected_current validation
+- Cycle 9: Kimi third-pass → false HIGH (atomic_write_bytes re-resolution claim, verified false at strategy_frontmatter.py:97-136) + POSIX-property MEDIUMs (advisory flock semantics, truncate-crash harmlessness)
+- Architect-called stop at cycle 9 per K2B L-2026-04-19-001 stop-rule precedent (diminishing-returns curve confirmed; further cycles produce ceremony not safety).
+
+**Tests:** 58 invest-coach tests pass; full suite 1462 pass + 1 skipped.
+
+**Deferred follow-ups:** documented in `wiki/concepts/feature_invest-coach.md` "Known follow-ups" — schema-layer verification claims (LOW), advisory flock semantics (MEDIUM, POSIX property), lock file crash observability (MEDIUM, harmless for flock).
+
+**Adversarial review discipline:** L-2026-04-30-001 honored. This is architect-called stop with documented justification, NOT operator-override (gates ran 9 times, verdicts landed, every real finding fixed inline, every deferred finding documented).
+
 ## 2026-05-04 -- review-runner reconnect-stall detector: closes Codex cold-start flake window
 
 **Commit:** `14f2a36`

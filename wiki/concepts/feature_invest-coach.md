@@ -2,7 +2,9 @@
 tags: [k2b-feature, k2bi, portfolio-manager-tier, coaching, phase-3.8a]
 date: 2026-05-04
 type: k2b-feature
-status: spec-approved
+status: shipped
+shipped-date: 2026-05-04
+shipped-commit: 4f8bcd5
 origin: k2b-architect
 priority: high
 effort: M
@@ -134,6 +136,22 @@ Fail: Vendor section hidden when T5.5 elected, OR present with empty values when
   The next caller reads the actual data file state under the lock and proceeds
   correctly. No live gap; defer to Phase 4 if crash-recovery observability
   becomes a priority.
+
+## Updates
+
+### 2026-05-04 -- SHIPPED at `4f8bcd5`
+
+**What shipped:**
+- `.claude/skills/invest-coach/SKILL.md` -- multi-turn coaching skill definition (T0-T13 + T5.5, Teach Mode integration, pause-or-generate table)
+- `scripts/lib/invest_coach.py` -- T5.5 composer/ingestor/provenance, T6 atomic writes, T7 verifier, T11 forward-guidance assembler, T12 renderer, stage advancement with flock, D7 feedback capture
+- `scripts/lib/invest_coach_schemas.py` -- lived-signal + vendor_provenance frontmatter validators
+- `tests/test_invest_coach.py` -- 58 tests across all 11 MVP gates + sub-tests 11a/11b/11c + schema tests
+- `.claude/skills/invest-feedback/SKILL.md` -- `capture_coach_rejection` entry point for D7 auto-capture
+- `wiki/concepts/feature_invest-coach.md` -- feature note with binary MVP test + deferred follow-ups
+
+**Review trail:** 9 adversarial review cycles. Original Codex HIGH (T7 fall-through-to-pass on unknown operator_check) verified closed by Codex Agent re-review at cycle 2. Cycles 3-9 via Kimi-backed `scripts/minimax-review.sh` hardened override discipline, path safety, concurrency, schema contracts. Architect-called stop at cycle 9 per K2B L-2026-04-19-001 stop-rule precedent (diminishing returns).
+
+**Tests:** 58 invest-coach tests pass; full suite 1462 pass + 1 skipped.
 
 ## Tier assignment
 
