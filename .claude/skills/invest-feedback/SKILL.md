@@ -150,6 +150,16 @@ After completing the main task, log this skill invocation:
 echo -e "$(date +%Y-%m-%d)\tinvest-feedback\t$(echo $RANDOM | md5sum | head -c 8)\tcaptured TYPE: DESCRIPTION" >> ~/Projects/K2Bi-Vault/wiki/context/skill-usage-log.tsv
 ```
 
+## invest-coach auto-capture (D7)
+
+When the invest-coach skill detects an operator rejection event at turns T2, T6, T8, or T10, it calls `capture_coach_rejection` from `scripts.lib.invest_coach`. This function writes a structured raw record to `K2Bi-Vault/raw/coach-feedback/<sigid>_<turn>_rejected.md` without modifying the existing `/learn`, `/error`, `/request` flow.
+
+The record format:
+- Frontmatter: tags, date, type=coach-feedback, origin=keith, up, sigid, turn_id
+- Body: rejected framing block + operator correction block
+
+These records are raw feedback streams that the observer loop or `/invest-improve` (when built) can harvest for pattern analysis. They do NOT replace `/learn` or `/error`; they supplement them with turn-level granularity.
+
 ## Notes
 
 - No em dashes, no AI cliches, no sycophancy

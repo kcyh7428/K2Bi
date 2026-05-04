@@ -699,7 +699,10 @@ def validate_verification(v: Verification) -> None:
         )
 
     if v.status == "operator-override":
-        if not v.override_reason or len(v.override_reason) < MIN_REASON_LEN:
+        if (
+            not isinstance(v.override_reason, str)
+            or len(v.override_reason) < MIN_REASON_LEN
+        ):
             raise ValueError(
                 f"verification.status == 'operator-override' requires "
                 f"override_reason >= {MIN_REASON_LEN} chars, got "
