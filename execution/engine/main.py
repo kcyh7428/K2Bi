@@ -633,16 +633,43 @@ class Engine:
                 await self._enter_disconnected(result, exc)
                 return
 
-        lookback_start = datetime.now(timezone.utc) - recovery_mod.DEFAULT_LOOKBACK
+        narrow_lookback_start = (
+            datetime.now(timezone.utc) - recovery_mod.DEFAULT_LOOKBACK
+        )
+        ext_lookback_start = (
+            datetime.now(timezone.utc)
+            - recovery_mod.EXTENDED_CHECKPOINT_LOOKBACK
+        )
         try:
             broker_positions = await self.connector.get_positions()
             broker_open_orders = await self.connector.get_open_orders()
-            broker_status = await self.connector.get_order_status_history(lookback_start)
+            # broker_status uses the narrow window: order-status history
+            # is recent broker activity, not a state checkpoint, and
+            # widening it would conflict with the existing
+            # reconciliation contract for terminal-state classification.
+            broker_status = await self.connector.get_order_status_history(
+                narrow_lookback_start
+            )
         except (AuthRequiredError, DisconnectedError) as exc:
             await self._enter_disconnected(result, exc, auth=isinstance(exc, AuthRequiredError))
             return
 
-        journal_tail = _read_recent_journal(self.journal, lookback_start)
+        narrow_journal_tail = _read_recent_journal(
+            self.journal, narrow_lookback_start
+        )
+        # Q42 +1 week carry-forward fix: prepend state-checkpoint
+        # events from the extended window so multi-day engine-off gaps
+        # don't re-flag previously-adopted positions / orphan STOPs as
+        # phantoms. Older events first, narrow tail second -- recovery
+        # replay walks forward and snapshot-resets per_ticker on each
+        # `engine_recovered`, so the most recent in the combined
+        # sequence wins.
+        extended_checkpoints = _read_extended_checkpoints(
+            self.journal,
+            ext_since=ext_lookback_start,
+            narrow_since=narrow_lookback_start,
+        )
+        journal_tail = extended_checkpoints + narrow_journal_tail
 
         # Codex round-3 P2: the EngineConfig-configurable override env
         # name must actually be consulted by reconcile(); otherwise a
@@ -2214,6 +2241,81 @@ def _read_recent_journal(
             LOG.warning("journal read_all(%s) raised: %s", when, exc)
     since_iso = since.isoformat()
     return [r for r in out if str(r.get("ts", "")) >= since_iso]
+
+
+def _read_extended_checkpoints(
+    journal: JournalWriter,
+    *,
+    ext_since: datetime,
+    narrow_since: datetime,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Read state-checkpoint events from [ext_since, narrow_since).
+
+    Q42 +1 week persistence FAIL (2026-05-03) carry-forward fix: a
+    multi-day engine-off gap leaves journal_tail empty under the 48h
+    DEFAULT_LOOKBACK, so the replay logic in
+    `recovery._positions_from_journal` and
+    `recovery._adopted_orphan_perm_ids` has nothing to seed from --
+    previously-adopted SPY positions and orphan STOPs re-flag as
+    phantoms.
+
+    This helper extends ONLY the lookup window for the event types in
+    `recovery.EXTENDED_CHECKPOINT_EVENT_TYPES`. Recovery's replay logic
+    is unchanged. Returns events in oldest-to-newest order so the
+    snapshot-reset semantics in `_positions_from_journal` apply
+    correctly (most recent `engine_recovered` wins).
+
+    Bounded by `recovery.EXTENDED_CHECKPOINT_LOOKBACK` (30 days).
+    File-system errors per day are logged-and-skipped, mirroring the
+    `_read_recent_journal` pattern -- a missing day file just means no
+    checkpoint that day, not a recovery failure.
+
+    `narrow_since` is the boundary that `_read_recent_journal` already
+    covers; events with `ts >= narrow_since` are filtered out here so
+    the caller can append the result to the narrow tail without
+    duplication.
+
+    `now` is injectable for tests; production passes the default
+    (`datetime.now(timezone.utc)`).
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    if ext_since >= narrow_since:
+        # Defensive: caller misconfigured the window. Return empty so
+        # behavior degrades to the current 48h-only lookup.
+        return []
+    out: list[dict[str, Any]] = []
+    days_back_ext = (now.date() - ext_since.date()).days
+    days_back_narrow = (now.date() - narrow_since.date()).days
+    # Walk day files from (narrow_since, ext_since] inclusive on the
+    # ext side; +1 because day_offset == days_back_narrow is already
+    # covered by `_read_recent_journal`.
+    for day_offset in range(days_back_narrow + 1, days_back_ext + 1):
+        when = now - timedelta(days=day_offset)
+        try:
+            day_records = journal.read_all(when)
+        except Exception as exc:  # pragma: no cover - shouldn't raise
+            LOG.warning(
+                "extended-checkpoint read_all(%s) raised: %s", when, exc
+            )
+            continue
+        for rec in day_records:
+            if (
+                rec.get("event_type")
+                not in recovery_mod.EXTENDED_CHECKPOINT_EVENT_TYPES
+            ):
+                continue
+            ts = str(rec.get("ts", ""))
+            if not ts:
+                continue
+            if ts < ext_since.isoformat():
+                continue
+            if ts >= narrow_since.isoformat():
+                continue  # already covered by narrow tail
+            out.append(rec)
+    out.sort(key=lambda r: str(r.get("ts", "")))
+    return out
 
 
 def _validate_journal_view(journal_view: dict[str, Any]) -> dict[str, Any] | None:
