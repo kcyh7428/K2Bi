@@ -85,6 +85,21 @@ Every confirmed turn writes its output to the vault atomically (tmp + os.replace
 
 On resume (T0): coach reads the lived-signal artifact + scans the above paths + reconstructs resume state. Mid-turn pauses recover by re-reading the partial draft state already in the vault.
 
+## Canonical frontmatter builders (T6 / T8 / T9 / T10 / T11)
+
+Every on-disk frontmatter write at T6 / T8 / T9 / T10 / T11 close goes through one of three Python helpers in `scripts.lib.invest_coach`. They are the single seam between coach pipeline state and what cycle-5 helper Step A + T8 invest-bear-case + T9 invest-backtest + the engine loader read. They emit the canonical top-level shape and preserve nested copies for audit-trail richness.
+
+| Turn | Builder | Output |
+|---|---|---|
+| T6 / T8 close | `build_canonical_ticker_frontmatter(symbol, sigid, thesis_5dim_pct, bear_case, ...)` | Ticker frontmatter with `thesis_score`, `symbol`, `bear_verdict`, `bear-last-verified`, `bear_conviction`, `bear_top_counterpoints` surfaced top-level |
+| T9 entry | `build_t9_placeholder_strategy_frontmatter(slug, symbol, sigid)` | Placeholder `wiki/strategies/strategy_<slug>.md` with `status: proposed-t9-placeholder` so invest-backtest's `order.ticker` precondition passes |
+| T10 close | `build_canonical_strategy_frontmatter(name, symbol, sigid, risk_envelope_pct, order, forward_guidance_metrics, forward_guidance_status, ...)` | Strategy frontmatter with `name`, `strategy_type`, `risk_envelope_pct`, `regime_filter`, `order:` (using `qty` + `stop_loss`), and `forward_guidance_check:` in MVP-3 list-of-mappings shape |
+| T10 close (body) | `render_accepted_gaps_section()` | Four accepted-gap markdown blocks emitted verbatim into the strategy file body so plan-review does not re-surface them |
+
+Spec source: `K2Bi-Vault/wiki/planning/feature_invest-coach-cycle5-helper-schema-reconciliation.md` ("Implementation breakdown" section). The coach MUST call these builders rather than hand-author frontmatter. The builders raise `ValueError` on any missing required key, which surfaces a contract violation at write time rather than hours later at `/invest-ship`.
+
+T9 sequencing detail: at T9 entry, if `wiki/strategies/strategy_<slug>.md` does not exist, write the placeholder frontmatter (no body required) atomically before invoking `/backtest <slug>`. T10 close detects `status: proposed-t9-placeholder` and overwrites with the full canonical frontmatter from `build_canonical_strategy_frontmatter()` plus the body sections (How This Works, Bucket Rules, Accepted Gaps from `render_accepted_gaps_section()`).
+
 ## Teach Mode integration
 
 invest-coach is the canonical novice-tier entry point.

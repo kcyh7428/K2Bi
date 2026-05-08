@@ -537,6 +537,419 @@ def assemble_forward_guidance_check(
     return fgc
 
 
+# ---------- T6 / T8 / T10 canonical frontmatter builders ----------
+#
+# Spec ref: feature_invest-coach-cycle5-helper-schema-reconciliation.md,
+# Boundary A + A.1 + A.2. These builders are the single seam between the
+# coach pipeline state and the on-disk frontmatter that downstream
+# consumers (cycle-5 helper Step A, T8 invest-bear-case, T9 invest-backtest,
+# engine loader.load_document) read. The previous regime had each consumer
+# walking a different nested shape; this seam emits the canonical
+# top-level shape every consumer expects, with nested copies preserved
+# for audit-trail richness.
+
+
+REQUIRED_BEAR_CASE_KEYS = (
+    "bear_verdict",
+    "bear_last_verified",
+    "bear_conviction",
+    "bear_top_counterpoints",
+)
+
+
+def build_canonical_ticker_frontmatter(
+    *,
+    symbol: str,
+    sigid: str,
+    thesis_5dim_pct: int,
+    bear_case: dict[str, Any],
+    date: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return canonical ticker-file frontmatter with cycle-5 + T8 fields top-level.
+
+    Surfaces the fields the cycle-5 helper Step A and the T8
+    `invest-bear-case` skill require at the top level (`thesis_score`,
+    `symbol`, `bear_verdict`, `bear-last-verified`, `bear_conviction`,
+    `bear_top_counterpoints`, optional `bear_invalidation_scenarios`)
+    while preserving the nested `bear_case:` block as the audit trail.
+
+    Args:
+        symbol: Uppercase ticker symbol.
+        sigid: Lived-signal ID for cross-link to the macro theme.
+        thesis_5dim_pct: T6 thesis 5-dim sub-score percentage in [0, 100].
+            Surfaced as top-level `thesis_score` for the T8 precondition.
+        bear_case: Dict with the bear-case fields. Required keys per
+            REQUIRED_BEAR_CASE_KEYS plus the optional
+            `bear_invalidation_scenarios`.
+        date: ISO-8601 date string for the `date:` frontmatter field.
+            Defaults to today's date.
+        extra: Optional dict of additional fields (company, exchange,
+            phase notes, etc.). Cannot clobber canonical fields.
+
+    Raises:
+        ValueError: On invalid symbol, sigid, thesis_5dim_pct out of range,
+            non-dict bear_case, or missing required bear-case keys.
+    """
+    if not symbol or not isinstance(symbol, str):
+        raise ValueError(
+            f"symbol must be a non-empty string, got {symbol!r}"
+        )
+    if not sigid or not isinstance(sigid, str):
+        raise ValueError(
+            f"sigid must be a non-empty string, got {sigid!r}"
+        )
+    if not isinstance(thesis_5dim_pct, int) or isinstance(thesis_5dim_pct, bool):
+        raise ValueError(
+            f"thesis_5dim_pct must be int, "
+            f"got {type(thesis_5dim_pct).__name__}"
+        )
+    if not 0 <= thesis_5dim_pct <= 100:
+        raise ValueError(
+            f"thesis_5dim_pct must be in [0, 100], got {thesis_5dim_pct}"
+        )
+    if not isinstance(bear_case, dict):
+        raise ValueError(
+            f"bear_case must be a dict, got {type(bear_case).__name__}"
+        )
+    missing = [k for k in REQUIRED_BEAR_CASE_KEYS if k not in bear_case]
+    if missing:
+        raise ValueError(
+            f"bear_case missing required keys: {missing}"
+        )
+
+    fm: dict[str, Any] = {
+        "tags": ["ticker", "k2bi", "thesis"],
+        "date": date or _dt.date.today().isoformat(),
+        "type": "ticker",
+        "origin": "k2bi-extract",
+        "up": "[[index]]",
+        "ticker": symbol,  # legacy alias retained for backward-compat
+        "symbol": symbol,
+        "sigid": sigid,
+        "thesis_score": thesis_5dim_pct,
+        "bear_verdict": bear_case["bear_verdict"],
+        "bear-last-verified": bear_case["bear_last_verified"],
+        "bear_conviction": bear_case["bear_conviction"],
+        "bear_top_counterpoints": list(bear_case["bear_top_counterpoints"]),
+    }
+
+    if "bear_invalidation_scenarios" in bear_case:
+        fm["bear_invalidation_scenarios"] = list(
+            bear_case["bear_invalidation_scenarios"]
+        )
+
+    fm["bear_case"] = dict(bear_case)
+
+    if extra:
+        for k, v in extra.items():
+            if k not in fm:
+                fm[k] = v
+
+    return fm
+
+
+REQUIRED_ORDER_INPUT_KEYS = (
+    "ticker",
+    "side",
+    "qty",
+    "order_type",
+    "stop_loss",
+    "time_in_force",
+)
+
+
+_ALLOWED_ORDER_TYPES = ("MKT", "LMT")
+_ALLOWED_FORWARD_GUIDANCE_STATUSES = ("pass", "override", "waive")
+
+
+def _yaml_safe_decimal(v: Any) -> float:
+    """Coerce Decimal/str/float to a YAML-friendly float.
+
+    Decimal cannot be represented by `yaml.safe_dump`. The on-disk
+    convention (existing G + SPY strategy files) is plain floats.
+    Going through `Decimal(str(v))` preserves human-entered precision
+    before the float cast.
+    """
+    from decimal import Decimal as _Decimal
+    return float(_Decimal(str(v)))
+
+
+def _serialize_forward_guidance_check(fgc: sf.ForwardGuidanceCheck) -> dict[str, Any]:
+    metrics: list[dict[str, Any]] = []
+    for tm in fgc.thresholded_metrics:
+        entry: dict[str, Any] = {
+            "metric": tm.metric,
+            "locked_threshold_text": tm.locked_threshold_text,
+            "guide_source_text": tm.guide_source_text,
+            "guide_range_text": tm.guide_range_text,
+            "sits_inside_guide": tm.sits_inside_guide,
+        }
+        if tm.operator_note:
+            entry["operator_note"] = tm.operator_note
+        metrics.append(entry)
+    return {
+        "completed_at": fgc.completed_at,
+        "status": fgc.status,
+        "override_reason": fgc.override_reason,
+        "waive_reason": fgc.waive_reason,
+        "thresholded_metrics": metrics,
+    }
+
+
+def build_canonical_strategy_frontmatter(
+    *,
+    name: str,
+    symbol: str,
+    sigid: str,
+    risk_envelope_pct: Any,
+    order: dict[str, Any],
+    forward_guidance_metrics: list[dict[str, Any]],
+    forward_guidance_status: str,
+    forward_guidance_override_reason: str | None = None,
+    forward_guidance_waive_reason: str | None = None,
+    regime_filter: list[Any] | None = None,
+    date: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return canonical strategy-file frontmatter satisfying every consumer.
+
+    Output passes:
+      - cycle-5 helper Step A REQUIRED_STRATEGY_FIELDS check
+      - cycle-5 helper Step A REQUIRED_ORDER_FIELDS check
+      - strategy_frontmatter.validate_forward_guidance_check (MVP-3 shape)
+      - execution.strategies.loader.load_document parse
+
+    Args:
+        name: Strategy slug (canonical `name:` field; also emitted as `slug:`
+            alias for backward-compat with audit trail).
+        symbol: Ticker symbol (operator-readable top-level + inside `order:`).
+        sigid: Lived-signal cross-link identifier.
+        risk_envelope_pct: Decimal-form risk envelope (e.g. Decimal("0.0025")
+            for 0.25% NAV-at-risk). Decimal/str/float all accepted.
+        order: Order dict with required keys per REQUIRED_ORDER_INPUT_KEYS:
+            ticker, side, qty, order_type, stop_loss, time_in_force.
+            limit_price is required for LMT and may be None for MKT.
+        forward_guidance_metrics: List of metric dicts for the T11 block.
+        forward_guidance_status: 'pass' | 'override' | 'waive'.
+        forward_guidance_override_reason: Required if status='override'
+            (>=20 chars enforced downstream).
+        forward_guidance_waive_reason: Required if status='waive'.
+        regime_filter: Default empty list per Boundary C accepted-gap.
+        date: ISO-8601 date for the `date:` frontmatter field.
+        extra: Optional fields (status override, thesis_ref, position_size
+            metadata, t10_close audit block, etc.).
+
+    Raises:
+        ValueError: On invalid inputs or an order block that cannot be
+            reconciled with its order_type (e.g. LMT without limit_price).
+    """
+    if not name or not isinstance(name, str):
+        raise ValueError(f"name must be a non-empty string, got {name!r}")
+    if not symbol or not isinstance(symbol, str):
+        raise ValueError(f"symbol must be a non-empty string, got {symbol!r}")
+    if not sigid or not isinstance(sigid, str):
+        raise ValueError(f"sigid must be a non-empty string, got {sigid!r}")
+    if not isinstance(order, dict):
+        raise ValueError(
+            f"order must be a dict, got {type(order).__name__}"
+        )
+    deprecated_present = [k for k in ("quantity", "stop_loss_usd") if k in order]
+    if deprecated_present:
+        raise ValueError(
+            f"order carries deprecated keys {deprecated_present}; "
+            f"use `qty` instead of `quantity` and `stop_loss` instead of "
+            f"`stop_loss_usd` per the canonical schema"
+        )
+    missing = [k for k in REQUIRED_ORDER_INPUT_KEYS if k not in order]
+    if missing:
+        raise ValueError(
+            f"order missing required keys: {missing} "
+            f"(use qty + stop_loss + order_type)"
+        )
+
+    order_type = order["order_type"]
+    if not isinstance(order_type, str) or order_type.strip().upper() not in _ALLOWED_ORDER_TYPES:
+        raise ValueError(
+            f"order.order_type must be one of {list(_ALLOWED_ORDER_TYPES)}, "
+            f"got {order_type!r}"
+        )
+    order_type = order_type.strip().upper()
+
+    qty_in = order["qty"]
+    if not isinstance(qty_in, int) or isinstance(qty_in, bool) or qty_in <= 0:
+        raise ValueError(
+            f"order.qty must be a positive int, got {qty_in!r}"
+        )
+
+    if forward_guidance_status not in _ALLOWED_FORWARD_GUIDANCE_STATUSES:
+        raise ValueError(
+            f"forward_guidance_status must be one of "
+            f"{list(_ALLOWED_FORWARD_GUIDANCE_STATUSES)}, "
+            f"got {forward_guidance_status!r}"
+        )
+
+    fgc = assemble_forward_guidance_check(
+        thresholded_metrics=forward_guidance_metrics,
+        status=forward_guidance_status,
+        override_reason=forward_guidance_override_reason,
+        waive_reason=forward_guidance_waive_reason,
+    )
+
+    limit_price_raw = order.get("limit_price")
+    if order_type == "LMT":
+        if limit_price_raw is None:
+            raise ValueError(
+                "order.limit_price is required when order.order_type='LMT'"
+            )
+        limit_price_out: Any = _yaml_safe_decimal(limit_price_raw)
+    else:
+        if limit_price_raw is not None:
+            raise ValueError(
+                "order.limit_price must be None when order.order_type='MKT'; "
+                "carrying a price on a MKT order would silently behave like a "
+                "marketable LMT downstream"
+            )
+        limit_price_out = None
+
+    canonical_order: dict[str, Any] = {
+        "ticker": order["ticker"],
+        "side": order["side"],
+        "qty": qty_in,
+        "order_type": order_type,
+        "limit_price": limit_price_out,
+        "stop_loss": _yaml_safe_decimal(order["stop_loss"]),
+        "time_in_force": order["time_in_force"],
+    }
+    for k, v in order.items():
+        if k in canonical_order or k in ("quantity", "stop_loss_usd"):
+            continue
+        canonical_order[k] = v
+
+    fm: dict[str, Any] = {
+        "tags": ["strategy", symbol.lower(), "k2bi"],
+        "date": date or _dt.date.today().isoformat(),
+        "type": "strategy",
+        "origin": "k2bi-generate",
+        "up": "[[index]]",
+        "name": name,
+        "slug": name,
+        "strategy_type": "hand_crafted",
+        "risk_envelope_pct": _yaml_safe_decimal(risk_envelope_pct),
+        "regime_filter": list(regime_filter) if regime_filter else [],
+        "ticker": symbol,
+        "status": "proposed",
+        "sigid": sigid,
+        "thesis_ref": f"[[../tickers/{symbol}]]",
+        "order": canonical_order,
+        "forward_guidance_check": _serialize_forward_guidance_check(fgc),
+    }
+
+    if extra:
+        for k, v in extra.items():
+            if k in ("name", "strategy_type", "risk_envelope_pct", "order"):
+                continue
+            fm[k] = v
+
+    return fm
+
+
+ACCEPTED_GAPS_HEADING = "## Accepted Gaps for Phase 3.8b First Paper Trade"
+
+
+_ACCEPTED_GAPS_BODY = """## Accepted Gaps for Phase 3.8b First Paper Trade
+
+The following plan-review architecture concerns are explicitly accepted as
+known gaps for Phase 3.8b (first paper trade per ticker). Each is captured
+here so that plan-review at /ship time does not re-surface them as novel
+findings; future-trade iterations close them per the roadmap below.
+
+### Gap 1 -- Kill-criterion override keyed to guide endpoints
+
+Kill criteria are deliberately keyed to management's published guide
+endpoints because the thesis IS that management hits guide; a mechanical
+trigger when guide breaks is the intended downside discipline.
+Future iteration: explore a 50%-of-guide variant for drawdown tolerance.
+See L-2026-04-27-005.
+
+### Gap 2 -- MKT-gap-risk on small fractional sizing
+
+At 0.25% NAV-at-risk fractional sizing, a worst-case 20% gap-down at the
+open puts ~0.05% NAV over budget; bounded and acceptable for first paper
+trade. Future iteration: opening-range-confirmation order type once the
+validator supports it.
+
+### Gap 3 -- Conviction-linked sizing absent
+
+Sizing is locked at the architect-decided fractional cap for the first
+paper trade per ticker; not conviction-driven. Future iteration:
+implement a `bear_conviction` -> NAV-at-risk formula from trade #2
+onwards.
+
+### Gap 4 -- Empty regime_filter
+
+Phase 4 immediate narrative-reversal kill criterion (b) provides
+regime-related exit discipline. `regime_filter:` for entry-time
+discipline lands in a future iteration. Default is empty until
+ticker-specific regime parameters are identified at T10 by the operator.
+"""
+
+
+def render_accepted_gaps_section() -> str:
+    """Return the canonical Phase 3.8b accepted-gaps body section.
+
+    Spec ref: feature_invest-coach-cycle5-helper-schema-reconciliation.md
+    Boundary C. The coach emits this verbatim into the strategy file body
+    at T10 close so plan-review at /ship time treats the four findings
+    from the G strategy review as known gaps rather than novel surfaces.
+
+    Operators may edit per-ticker if a gap doesn't apply (e.g. a ticker's
+    stop-loss is wide enough that gap-risk isn't an issue).
+    """
+    return _ACCEPTED_GAPS_BODY
+
+
+def build_t9_placeholder_strategy_frontmatter(
+    *,
+    slug: str,
+    symbol: str,
+    sigid: str,
+    date: str | None = None,
+) -> dict[str, Any]:
+    """Return T9 placeholder strategy frontmatter so invest-backtest can run.
+
+    Spec ref: Boundary B.2. invest-backtest's precondition reads
+    `wiki/strategies/strategy_<slug>.md`'s `order.ticker` -- so the T9
+    entry auto-authors a placeholder file carrying just enough to pass
+    that read. T10 close detects status=`proposed-t9-placeholder` and
+    overwrites with the full frontmatter from
+    build_canonical_strategy_frontmatter().
+    """
+    if not slug or not isinstance(slug, str):
+        raise ValueError(f"slug must be a non-empty string, got {slug!r}")
+    if not symbol or not isinstance(symbol, str):
+        raise ValueError(f"symbol must be a non-empty string, got {symbol!r}")
+    if not sigid or not isinstance(sigid, str):
+        raise ValueError(f"sigid must be a non-empty string, got {sigid!r}")
+
+    return {
+        "tags": ["strategy", symbol.lower(), "k2bi", "t9-placeholder"],
+        "date": date or _dt.date.today().isoformat(),
+        "type": "strategy",
+        "origin": "k2bi-generate",
+        "up": "[[index]]",
+        "name": slug,
+        "slug": slug,
+        "ticker": symbol,
+        "status": "proposed-t9-placeholder",
+        "sigid": sigid,
+        "thesis_ref": f"[[../tickers/{symbol}]]",
+        "order": {
+            "ticker": symbol,
+        },
+    }
+
+
 # ---------- T12 final-summary renderer ----------
 
 
