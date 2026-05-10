@@ -56,6 +56,7 @@ excludes:
   - .claude/hooks                # PreToolUse/PostToolUse hooks run on the MacBook where
                                  # Claude Code runs; Mini is Trader tier (no Claude Code)
   - .claude/settings.local.json  # gitignored per-machine override
+  - .codex                       # Codex handoff specs and local job context
   # Python + node detritus
   - .venv
   - __pycache__
