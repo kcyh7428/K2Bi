@@ -194,3 +194,39 @@ class PositionAwareSkipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failures[0]["strategy"], "spy-rotational")
         self.assertEqual(failures[0]["payload"]["symbol"], "SPY")
         self.assertIn("position query unavailable", failures[0]["payload"]["error"])
+
+    async def test_position_change_between_check_and_submit_blocks_buy(self) -> None:
+        await self._init_engine()
+        position_snapshots = [
+            [],
+            [BrokerPosition(ticker="SPY", qty=10, avg_price=Decimal("500"))],
+        ]
+
+        async def sequence_positions() -> list[BrokerPosition]:
+            if position_snapshots:
+                return position_snapshots.pop(0)
+            return []
+
+        self.connector.get_positions = sequence_positions  # type: ignore[method-assign]
+
+        tick = await self.engine.tick_once()
+
+        self.assertEqual(tick.orders_submitted, 0)
+        self.assertEqual(len(self.connector.submitted_orders), 0)
+        skips = self._events("cycle_skipped_position_at_target")
+        self.assertEqual(len(skips), 1)
+        self.assertEqual(skips[0]["payload"]["current_qty"], 10)
+        self.assertEqual(
+            skips[0]["payload"]["position_state"], "at_or_above_target"
+        )
+
+    async def test_position_skip_does_not_mutate_engine_position_cache(self) -> None:
+        await self._init_engine()
+        self.assertEqual(self.engine._positions, [])
+        self.connector.positions = [
+            BrokerPosition(ticker="SPY", qty=10, avg_price=Decimal("500"))
+        ]
+
+        await self.engine.tick_once()
+
+        self.assertEqual(self.engine._positions, [])

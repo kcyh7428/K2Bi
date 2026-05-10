@@ -1247,7 +1247,9 @@ class Engine:
             trade_id = new_ulid()
             if await self._skip_buy_for_existing_position(
                 snap=snap,
-                candidate=decision.candidate,
+                symbol=decision.candidate.ticker,
+                side=decision.candidate.side,
+                target_qty=decision.candidate.qty,
                 trade_id=trade_id,
             ):
                 continue
@@ -1351,13 +1353,14 @@ class Engine:
         self,
         *,
         snap: ApprovedStrategySnapshot,
-        candidate: CandidateOrder,
+        symbol: str,
+        side: str,
+        target_qty: int,
         trade_id: str,
     ) -> bool:
-        if candidate.side.lower() != "buy":
+        if side.lower() != "buy":
             return False
 
-        symbol = candidate.ticker
         try:
             broker_positions = await self.connector.get_positions()
         except ConnectorError as exc:
@@ -1366,7 +1369,7 @@ class Engine:
                 payload={
                     "strategy_id": snap.name,
                     "symbol": symbol,
-                    "target_qty": candidate.qty,
+                    "target_qty": target_qty,
                     "cycle_id": trade_id,
                     "error": str(exc),
                     "error_class": type(exc).__name__,
@@ -1374,8 +1377,8 @@ class Engine:
                 strategy=snap.name,
                 trade_id=trade_id,
                 ticker=symbol,
-                side=candidate.side,
-                qty=candidate.qty,
+                side=side,
+                qty=target_qty,
             )
             raise
 
@@ -1384,13 +1387,12 @@ class Engine:
             for position in broker_positions
             if position.ticker.upper() == symbol.upper()
         )
-        self._positions = broker_positions
         if current_qty == 0:
             return False
 
         position_state = (
             "at_or_above_target"
-            if current_qty >= candidate.qty
+            if current_qty >= target_qty
             else "partial_position"
         )
         self.journal.append(
@@ -1399,15 +1401,15 @@ class Engine:
                 "strategy_id": snap.name,
                 "symbol": symbol,
                 "current_qty": current_qty,
-                "target_qty": candidate.qty,
+                "target_qty": target_qty,
                 "position_state": position_state,
                 "cycle_id": trade_id,
             },
             strategy=snap.name,
             trade_id=trade_id,
             ticker=symbol,
-            side=candidate.side,
-            qty=candidate.qty,
+            side=side,
+            qty=target_qty,
         )
         return True
 
@@ -1510,6 +1512,15 @@ class Engine:
         # number for MKT.
         if (wire_order_type or "").strip().upper() == "MKT":
             wire_limit_price = None
+        if await self._skip_buy_for_existing_position(
+            snap=snap,
+            symbol=order.ticker,
+            side=order.side,
+            target_qty=order.qty,
+            trade_id=trade_id,
+        ):
+            self.state = EngineState.CONNECTED_IDLE
+            return
         try:
             ack = await self.connector.submit_order(
                 ticker=order.ticker,
