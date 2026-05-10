@@ -121,6 +121,27 @@ class Tier1OtherTests(unittest.TestCase):
         self.assertEqual(alerts[0].event_type, "recovery_state_mismatch")
         self.assertIn("Override: 1", alerts[0].message)
 
+    def test_position_query_failure_fires_alert(self):
+        ev = _event(
+            "cycle_skipped_position_query_failed",
+            "id12",
+            payload={
+                "symbol": "SPY",
+                "target_qty": 10,
+                "abort_phase": "pre_submit_recheck",
+                "error_class": "ConnectorError",
+                "error": "position query unavailable",
+            },
+        )
+        alerts, _ = ial.classify_events([ev], ial.ClassifierState(), threshold=300)
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0].tier, 1)
+        self.assertEqual(
+            alerts[0].event_type, "cycle_skipped_position_query_failed"
+        )
+        self.assertIn("SPY", alerts[0].message)
+        self.assertIn("pre_submit_recheck", alerts[0].message)
+
 
 # ---------------------------------------------------------------------------
 # Tier 2 -- order / kill events

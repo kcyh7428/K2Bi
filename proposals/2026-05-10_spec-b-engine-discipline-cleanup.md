@@ -88,7 +88,7 @@ Before submitting any BUY for a strategy, query `ib.positions()` for the symbol.
 - Call helper in cycle at the top of the BUY-fire path and again immediately before `ib.placeOrder()`.
 - Journal a new event type `cycle_skipped_existing_position` (append to `journal/schema.py` + `journal/writer.py` allowed-events list).
 - Position query uses the same connector already wired for validators -- no new connection.
-- If `ib.positions()` returns an error, fail-closed: skip the submission, journal `cycle_skipped_position_query_failed` with `abort_phase` set to `decision` or `pre_submit_recheck`, and surface to alert pipeline.
+- If `ib.positions()` returns an error, fail-closed: skip the submission, journal `cycle_skipped_position_query_failed` with `abort_phase` set to `decision` or `pre_submit_recheck`, and surface to alert pipeline as a Tier 1 alert.
 
 ### Known §1 limitations
 

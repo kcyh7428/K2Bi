@@ -44,6 +44,7 @@ STATE_FILE_NAME = "alert-state.json"
 # ---------------------------------------------------------------------------
 
 TIER_1_EVENTS = frozenset({
+    "cycle_skipped_position_query_failed",
     "engine_stopped",
     "recovery_state_mismatch",
 })
@@ -294,6 +295,34 @@ def _build_recovery_mismatch_alert(event: dict[str, Any]) -> Alert:
     )
 
 
+def _build_position_query_failed_alert(event: dict[str, Any]) -> Alert:
+    payload = event.get("payload") or {}
+    symbol = payload.get("symbol", event.get("ticker", "?"))
+    target_qty = payload.get("target_qty", "?")
+    abort_phase = payload.get("abort_phase", "?")
+    error_class = payload.get("error_class", "ConnectorError")
+    error = payload.get("error", "")
+    msg = (
+        f"🔴 T1: cycle_skipped_position_query_failed\n"
+        f"{symbol} target_qty={target_qty}\n"
+        f"Phase: {abort_phase}\n"
+        f"Error: {error_class}: {error}"
+    )
+    return Alert(
+        tier=1,
+        event_type="cycle_skipped_position_query_failed",
+        journal_entry_id=event["journal_entry_id"],
+        ts=event["ts"],
+        message=msg,
+        context={
+            "symbol": symbol,
+            "target_qty": target_qty,
+            "abort_phase": abort_phase,
+            "error_class": error_class,
+        },
+    )
+
+
 def _build_order_filled_alert(event: dict[str, Any]) -> Alert:
     payload = event.get("payload") or {}
     ticker = payload.get("ticker", "?")
@@ -432,6 +461,8 @@ def classify_events(
                 alerts.append(_build_engine_stopped_alert(ev))
             elif event_type == "recovery_state_mismatch":
                 alerts.append(_build_recovery_mismatch_alert(ev))
+            elif event_type == "cycle_skipped_position_query_failed":
+                alerts.append(_build_position_query_failed_alert(ev))
             continue
 
         if event_type in TIER_2_EVENTS:
