@@ -634,13 +634,9 @@ class Engine:
                 await self._enter_disconnected(result, exc)
                 return
 
-        narrow_lookback_start = (
-            datetime.now(timezone.utc) - recovery_mod.DEFAULT_LOOKBACK
-        )
-        ext_lookback_start = (
-            datetime.now(timezone.utc)
-            - recovery_mod.EXTENDED_CHECKPOINT_LOOKBACK
-        )
+        startup_now = datetime.now(timezone.utc)
+        narrow_lookback_start = startup_now - recovery_mod.DEFAULT_LOOKBACK
+        ext_lookback_start = startup_now - recovery_mod.EXTENDED_CHECKPOINT_LOOKBACK
         try:
             broker_positions = await self.connector.get_positions()
             broker_open_orders = await self.connector.get_open_orders()
@@ -671,7 +667,7 @@ class Engine:
             narrow_since=narrow_lookback_start,
         )
         journal_tail = extended_checkpoints + narrow_journal_tail
-        self._refresh_pending_orders_from_journal()
+        self._refresh_pending_orders_from_journal(now=startup_now)
 
         # Codex round-3 P2: the EngineConfig-configurable override env
         # name must actually be consulted by reconcile(); otherwise a
@@ -700,7 +696,7 @@ class Engine:
             broker_positions=broker_positions,
             broker_open_orders=broker_open_orders,
             broker_order_status=broker_status,
-            now=datetime.now(timezone.utc),
+            now=startup_now,
             override_env=override_env_value,
             override_env_name=self.engine_config.allow_recovery_mismatch_env,
             adopt_orphan_stop=adopt_request,
@@ -1189,7 +1185,7 @@ class Engine:
             current_marks=marks,
         )
         market = MarketSnapshot(ts=now, marks=marks, account_value=account.net_liquidation)
-        self._refresh_pending_orders_from_journal()
+        self._refresh_pending_orders_from_journal(now=now)
 
         for snap in self._strategies:
             # R2-minimax P2: retirement sentinel check runs BEFORE the
@@ -1374,9 +1370,13 @@ class Engine:
             if self._pending_order is not None:
                 break
 
-    def _refresh_pending_orders_from_journal(self) -> None:
+    def _refresh_pending_orders_from_journal(self, now: datetime | None = None) -> None:
         records: list[dict[str, Any]] = []
-        now = datetime.now(timezone.utc)
+        if now is None:
+            now = datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            raise ValueError("pending-order replay clock must be timezone-aware")
+        now = now.astimezone(timezone.utc)
         for day_offset in (2, 1, 0):
             records.extend(
                 self.journal.read_all_strict(now - timedelta(days=day_offset))

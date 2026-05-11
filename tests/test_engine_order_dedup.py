@@ -448,6 +448,39 @@ class OrderDedupTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(JournalReplayMalformedJsonError):
             await self.engine.tick_once()
 
+    async def test_d4h_startup_pending_replay_uses_init_clock(self) -> None:
+        import execution.engine.main as main_mod
+        from datetime import datetime as real_dt
+
+        startup_now = datetime(2026, 5, 10, 23, 59, 59, tzinfo=timezone.utc)
+        later_now = datetime(2026, 5, 11, 0, 0, 1, tzinfo=timezone.utc)
+        now_calls = 0
+        captured: list[datetime] = []
+
+        class _PatchedDT(real_dt):
+            @classmethod
+            def now(cls, tz=None):
+                nonlocal now_calls
+                now_calls += 1
+                current = startup_now if now_calls == 1 else later_now
+                return current if tz is None else current.astimezone(tz)
+
+        def _capture_refresh(engine_self, now: datetime) -> None:
+            captured.append(now)
+            engine_self._pending_orders = {}
+
+        original_datetime = main_mod.datetime
+        original_refresh = Engine._refresh_pending_orders_from_journal
+        try:
+            main_mod.datetime = _PatchedDT
+            Engine._refresh_pending_orders_from_journal = _capture_refresh
+            await self.engine.tick_once()
+        finally:
+            main_mod.datetime = original_datetime
+            Engine._refresh_pending_orders_from_journal = original_refresh
+
+        self.assertEqual(captured, [startup_now])
+
     async def test_d5_cross_strategy_pending_order_does_not_block_submit(self) -> None:
         _write_strategy(self.strategies_dir, name="spy-secondary")
         await self._init_engine()
