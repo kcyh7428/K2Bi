@@ -21,13 +21,13 @@ Adversarial review at `.code-reviews/2026-05-08T04-22-34Z_d294dc.log` (Kimi-back
 
 | # | Severity | Title | Disposition | Defer-to |
 |---|---|---|---|---|
-| F1 | CRITICAL | clientId 90-99 has no allocator -- collision can kick engine off gateway | Defer | gateway-discipline pass (with F6) |
+| F1 | CRITICAL | clientId 90-99 has no allocator -- collision can kick engine off gateway | Closed in Spec B §6 | gateway-discipline pass (with F6) |
 | F2 | HIGH | T10 `share_count: pending` defers NAV without divergence validation | Defer | `K2Bi-Vault/wiki/planning/feature_engine-vault-snapshots.md` build session (with F5) |
-| F3 | HIGH | Skipped Codex on architectural commits (`c61b55a`, `4830e34`) abused the doc-only exception | Defer | discipline-cleanup pass; retroactive flag satisfied by this Kimi review |
-| F4 | HIGH | `review/` gitignore vs cycle-4 Check C structural conflict; `K2BI_ALLOW_CONFIG_EDIT=1` override now normalized | Defer | decision locked 2026-05-10: option A, drop `review/` from `.gitignore` |
+| F3 | HIGH | Skipped Codex on architectural commits (`c61b55a`, `4830e34`) abused the doc-only exception | Closed in Spec B §6 | discipline-cleanup pass; retroactive flag satisfied by this Kimi review |
+| F4 | HIGH | `review/` gitignore vs cycle-4 Check C structural conflict; `K2BI_ALLOW_CONFIG_EDIT=1` override now normalized | Closed in Spec B §6 | decision locked 2026-05-10: option A, drop `review/` from `.gitignore` |
 | F5 | MEDIUM | Dependency inversion -- invest-coach references engine snapshot schema not yet locked | Defer | feature_engine-vault-snapshots build session (with F2) |
-| F6 | MEDIUM | gateway-query.sh has no runtime caller-context guard -- skill-misuse boundary purely documentary | Defer | gateway-discipline pass (with F1) |
-| F7 | MEDIUM | L-2026-05-08-002 'operator-driven liveness' undefined for non-broker migrations | Defer | decision locked 2026-05-10: augment with IBKR + Syncthing examples |
+| F6 | MEDIUM | gateway-query.sh has no runtime caller-context guard -- skill-misuse boundary purely documentary | Closed in Spec B §6 | gateway-discipline pass (with F1) |
+| F7 | MEDIUM | L-2026-05-08-002 'operator-driven liveness' undefined for non-broker migrations | Closed in Spec B §6 | decision locked 2026-05-10: augment with IBKR + Syncthing examples |
 
 ## Per-finding context
 
@@ -96,12 +96,12 @@ The 5/8 incident's "11 orphan STPs cancelled via bounded clientId=1 exception" p
 
 ## Status
 
-`proposed` -- not in flight. Promote to In Progress when a focused discipline-cleanup session is scoped. Sub-bundles within the discipline-cleanup pass:
+`partially shipped` -- Spec B §6 closed sub-bundles A, C, D, and E on 2026-05-11. Sub-bundle B remains deferred to the engine snapshot pipeline by design.
 
-- **Sub-bundle A (gateway-discipline):** F1 + F6. Self-contained; ships gateway-query.sh hardening + clientId allocator.
+- **Sub-bundle A (gateway-discipline):** F1 + F6. Shipped in Spec B §6.
 - **Sub-bundle B (engine snapshot pipeline):** F2 + F5. Belongs to the `feature_engine-vault-snapshots.md` build session; do NOT split.
-- **Sub-bundle C (review-process discipline):** F3. Amend `invest-ship SKILL.md` Checkpoint 2 exception clause; should itself ship through full Codex review.
-- **Sub-bundle D (gitignore decision):** F4. Operator-call (a) or (b); single small commit either way.
-- **Sub-bundle E (rule operationalization):** F7. Augment L-2026-05-08-002 or demote.
+- **Sub-bundle C (review-process discipline):** F3. Shipped in Spec B §6.
+- **Sub-bundle D (gitignore decision):** F4. Shipped in Spec B §6 via option A.
+- **Sub-bundle E (rule operationalization):** F7. Shipped in Spec B §6 by augmenting L-2026-05-08-002.
 
-Sub-bundles A, C, D, E can run in any order. B is gated on the engine snapshot pipeline being scoped.
+Round-3 Kimi did not approve before the iteration cap. Codex self-judged the remaining tactical findings per operator authorization; accepted fixes and rejected scope expansions are captured in `.code-reviews/spec-b-section6-round1-response.md`, `.code-reviews/spec-b-section6-round2-response.md`, and `.code-reviews/spec-b-section6-round3-response.md`.
