@@ -73,6 +73,32 @@ def test_clientid_allocator_reclaims_stale_dead_owner_lease(tmp_path: Path) -> N
     clientid_allocator.release_client_id(reclaimed)
 
 
+def test_clientid_allocator_reclaims_fresh_dead_owner_lease(tmp_path: Path) -> None:
+    """F1 review hardening: dead owners are stale even inside the TTL."""
+    from scripts.lib import clientid_allocator
+
+    lease_dir = tmp_path / "leases"
+    first = clientid_allocator.allocate_client_id(
+        lease_dir=lease_dir,
+        preferred=92,
+        owner="fresh-dead-owner",
+    )
+    payload = json.loads(first.path.read_text())
+    payload["created_at"] = time.time()
+    payload["owner_pid"] = 999999
+    first.path.write_text(json.dumps(payload, sort_keys=True) + "\n")
+
+    reclaimed = clientid_allocator.allocate_client_id(
+        lease_dir=lease_dir,
+        preferred=92,
+        owner="fresh-reclaiming-owner",
+    )
+
+    assert reclaimed.client_id == 92
+    assert reclaimed.token != first.token
+    clientid_allocator.release_client_id(reclaimed)
+
+
 def test_gateway_query_script_enforces_allocator_and_operator_context() -> None:
     """F1/F6: gateway-query.sh must allocate clientIds and block skill misuse."""
     script = (REPO_ROOT / "scripts" / "gateway-query.sh").read_text()
@@ -81,6 +107,7 @@ def test_gateway_query_script_enforces_allocator_and_operator_context() -> None:
     assert "assert_invoked_from_macbook" in script
     assert "K2BI_GATEWAY_QUERY_OPERATOR_OVERRIDE" in script
     assert "CLAUDE_CODE_SKILL_INVOCATION" in script
+    assert "not an authentication boundary" in script
     assert "clientId=1" in script
     assert "trap" in script
     assert "release" in script

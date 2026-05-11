@@ -38,6 +38,8 @@ CLIENTID_LEASE_DIR="${K2BI_GATEWAY_CLIENTID_LEASE_DIR:-${TMPDIR:-/tmp}/k2bi-gate
 LEASE_PATH=""
 LEASE_TOKEN=""
 
+# This guard is an accidental-misuse safety rail, not an authentication boundary.
+# K2BI_GATEWAY_QUERY_OPERATOR_OVERRIDE is intentionally available to the operator.
 assert_invoked_from_macbook() {
     if [[ "${K2BI_GATEWAY_QUERY_OPERATOR_OVERRIDE:-}" == "1" ]]; then
         return 0

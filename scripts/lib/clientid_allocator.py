@@ -74,6 +74,8 @@ def _lease_is_stale(path: Path, *, now: float, ttl_seconds: int) -> bool:
         owner_pid = int(payload.get("owner_pid", payload.get("pid", 0)))
     except (TypeError, ValueError):
         owner_pid = 0
+    if owner_pid > 0:
+        return not _pid_is_alive(owner_pid)
     if _pid_is_alive(owner_pid):
         return False
     return now - created_at > ttl_seconds
