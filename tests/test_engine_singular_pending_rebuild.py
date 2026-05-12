@@ -257,6 +257,13 @@ class EngineSingularPendingRebuildTests(unittest.IsolatedAsyncioTestCase):
         healed = self._self_heal_events()
         self.assertEqual(len(healed), 1)
         self.assertEqual(
-            healed[0]["payload"]["rationale"],
-            "journal-rebuild matched terminal signal not reflected in awaiting state",
+            healed[0]["payload"]["heuristic_version"],
+            "v1",
         )
+
+        restart_engine = self._make_engine()
+        restart_tick = await restart_engine.tick_once()
+
+        self.assertEqual(restart_tick.state_after, EngineState.CONNECTED_IDLE)
+        self.assertIsNone(restart_engine._pending_order)
+        self.assertEqual(len(self._self_heal_events()), 1)

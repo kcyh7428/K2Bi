@@ -1595,6 +1595,8 @@ def _pending_from_journal(
                 order_type=order_type,
             )
             per_key_filled.setdefault(key, 0)
+        elif event_type == "order_timeout":
+            per_key.pop(key, None)
         elif is_terminal_signal_event(rec):
             per_key.pop(key, None)
         elif event_type == "order_filled":

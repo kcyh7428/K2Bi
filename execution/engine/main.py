@@ -61,7 +61,7 @@ from ..connectors.types import (
     LIVE_ORDER_STATUSES,
     TERMINAL_ORDER_STATUSES,
 )
-from ..journal.reader import find_terminal_for_trade_id
+from ..journal.reader import terminal_signals_by_trade_id
 from ..journal.schema import reject_non_finite_json_constant
 from ..journal.ulid import new_ulid
 from ..journal.writer import JournalWriter
@@ -2614,29 +2614,63 @@ class Engine:
             kwargs["strategy"] = event.strategy
         self.journal.append(event.event_type, **kwargs)
 
+    def _journal_recovery_self_healed_trade_ids(self) -> set[str]:
+        out: set[str] = set()
+        try:
+            journal_paths = sorted(self.journal.base_dir.glob("*.jsonl"))
+        except OSError as exc:
+            LOG.warning("journal self-heal dedupe glob raised: %s", exc)
+            return out
+        for path in journal_paths:
+            try:
+                when = datetime.strptime(path.stem, "%Y-%m-%d").replace(
+                    tzinfo=timezone.utc
+                )
+            except ValueError:
+                continue
+            try:
+                records = self.journal.read_all(when)
+            except Exception as exc:  # pragma: no cover - shouldn't raise
+                LOG.warning(
+                    "journal self-heal dedupe read_all(%s) raised: %s",
+                    when.date(),
+                    exc,
+                )
+                continue
+            for rec in records:
+                if rec.get("event_type") != "recovery_self_healed_pending_order":
+                    continue
+                trade_id = rec.get("trade_id")
+                if trade_id:
+                    out.add(str(trade_id))
+        return out
+
     def _journal_recovery_self_heals(
         self,
         journal_tail: list[dict[str, Any]],
     ) -> None:
-        healed_trade_ids = {
+        healed_trade_ids = self._journal_recovery_self_healed_trade_ids()
+        healed_trade_ids.update(
             str(rec.get("trade_id"))
             for rec in journal_tail
             if rec.get("event_type") == "recovery_self_healed_pending_order"
             and rec.get("trade_id")
-        }
+        )
         submitted_trade_ids = {
             str(rec.get("trade_id"))
             for rec in journal_tail
             if rec.get("event_type") == "order_submitted" and rec.get("trade_id")
         }
-        for trade_id in sorted(submitted_trade_ids - healed_trade_ids):
-            terminal = find_terminal_for_trade_id(trade_id, journal_tail)
-            if terminal is None:
-                continue
+        terminal_by_trade_id = terminal_signals_by_trade_id(journal_tail)
+        for trade_id in sorted(
+            (submitted_trade_ids - healed_trade_ids) & set(terminal_by_trade_id)
+        ):
+            terminal = terminal_by_trade_id[trade_id]
             self.journal.append(
                 "recovery_self_healed_pending_order",
                 payload={
                     "trade_id": trade_id,
+                    "heuristic_version": "v1",
                     "terminal_event_type": terminal.get("event_type"),
                     "terminal_journal_entry_id": terminal.get("journal_entry_id"),
                     "rationale": (

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
+
+
+LOG = logging.getLogger("k2bi.journal.reader")
 
 
 def _remaining_qty_is_zero(payload: dict[str, Any]) -> bool:
@@ -13,6 +17,10 @@ def _remaining_qty_is_zero(payload: dict[str, Any]) -> bool:
     try:
         return Decimal(str(raw)) == Decimal("0")
     except (InvalidOperation, TypeError, ValueError):
+        LOG.warning(
+            "journal terminal scan: invalid order_filled remaining_qty=%r",
+            raw,
+        )
         return False
 
 
@@ -40,3 +48,17 @@ def find_terminal_for_trade_id(
         if is_terminal_signal_event(event):
             return event
     return None
+
+
+def terminal_signals_by_trade_id(
+    records: Iterable[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Index newest terminal signal by trade_id in one forward scan."""
+    out: dict[str, dict[str, Any]] = {}
+    for event in records:
+        trade_id = event.get("trade_id")
+        if not trade_id:
+            continue
+        if is_terminal_signal_event(event):
+            out[str(trade_id)] = event
+    return out
