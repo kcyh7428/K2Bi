@@ -287,6 +287,44 @@ class JournalWriter:
         finally:
             self._release_lock(lock_fd)
 
+    def read_back_last_event(self, when: datetime | None = None) -> dict[str, Any]:
+        """Return the last complete event from the selected daily journal."""
+        ref = when or datetime.now(timezone.utc)
+        if ref.tzinfo is None:
+            raise ValueError("journal read-back `when` must be timezone-aware")
+        target = self._path_for(ref.astimezone(timezone.utc))
+        if not target.exists():
+            return {}
+
+        lock_fd = self._acquire_shared_lock(target)
+        try:
+            data = target.read_bytes()
+            if not data:
+                return {}
+            if not data.endswith(b"\n"):
+                raise JournalReplayTruncatedLineError(
+                    f"journal read-back found truncated final line: {target}"
+                )
+            lines = [line for line in data.splitlines() if line.strip()]
+            if not lines:
+                return {}
+            try:
+                record = json.loads(
+                    lines[-1].decode("utf-8"),
+                    parse_constant=reject_non_finite_json_constant,
+                )
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                raise JournalReplayMalformedJsonError(
+                    f"journal read-back JSON parse failed at {target}: {exc}"
+                ) from exc
+            if not isinstance(record, dict):
+                raise JournalReplayMalformedJsonError(
+                    f"journal read-back expected object at {target}"
+                )
+            return record
+        finally:
+            self._release_lock(lock_fd)
+
     def _acquire_shared_lock(self, path: Path) -> int:
         lock_path = self._lock_path_for(path)
         lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o644)

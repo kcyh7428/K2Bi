@@ -137,6 +137,10 @@ class EngineState(str, Enum):
     SHUTDOWN = "shutdown"
 
 
+class JournalDurabilityError(Exception):
+    """Raised when a journal write is not visible on read-back."""
+
+
 # States the tick loop treats as "engine no longer operates; early
 # return". Added HALTED alongside SHUTDOWN so the refuse-to-start
 # paths get a distinct operational label without changing tick
@@ -497,7 +501,11 @@ class Engine:
             poll_result = TickResult(
                 state_before=self.state, state_after=self.state
             )
-            await self._poll_awaiting(poll_result)
+            try:
+                await self._poll_awaiting(poll_result)
+            except JournalDurabilityError as exc:
+                await self._handle_journal_durability_error(exc)
+                break
             if (
                 self._pending_order is None
                 or self._pending_order.trade_id != original_trade_id
@@ -586,7 +594,10 @@ class Engine:
             # that complete under kill are journaled. Do NOT submit new
             # orders.
             if self._pending_order is not None:
-                await self._poll_awaiting(result)
+                try:
+                    await self._poll_awaiting(result)
+                except JournalDurabilityError as exc:
+                    await self._handle_journal_durability_error(exc)
             result.state_after = self.state
             return result
 
@@ -598,7 +609,10 @@ class Engine:
             return result
 
         # Main body: state is CONNECTED_IDLE or AWAITING_FILL (resume).
-        await self._run_tick_body(result)
+        try:
+            await self._run_tick_body(result)
+        except JournalDurabilityError as exc:
+            await self._handle_journal_durability_error(exc)
         result.state_after = self.state
         return result
 
@@ -951,6 +965,14 @@ class Engine:
             # Connection failure: no per-attempt event; the next tick's
             # disconnect_status covers cumulative outage reporting.
             LOG.warning("engine: disconnect at init -> %s", exc)
+
+    async def _handle_journal_durability_error(
+        self,
+        exc: JournalDurabilityError,
+    ) -> None:
+        LOG.error("engine: journal durability failure: %s", exc)
+        self._shutdown_requested = True
+        await self._shutdown(reason="journal_durability_failure")
 
     async def _attempt_reconnect(self, result: TickResult) -> None:
         delay = _reconnect_delay(self._reconnect_attempts)
@@ -2011,7 +2033,7 @@ class Engine:
         *,
         terminal_status: str,
     ) -> None:
-        self.journal.append(
+        record = self.journal.append(
             "order_terminal",
             payload={
                 "broker_order_id": pending.broker_order_id,
@@ -2025,6 +2047,26 @@ class Engine:
             broker_order_id=pending.broker_order_id,
             broker_perm_id=pending.broker_perm_id,
         )
+        try:
+            last = self.journal.read_back_last_event()
+        except Exception as exc:
+            raise JournalDurabilityError(
+                "order_terminal write durability check failed: "
+                f"read-back raised {type(exc).__name__}: {exc}"
+            ) from exc
+        if (
+            last.get("event_type") != "order_terminal"
+            or last.get("trade_id") != pending.trade_id
+            or last.get("journal_entry_id") != record.get("journal_entry_id")
+        ):
+            raise JournalDurabilityError(
+                "order_terminal write durability check failed: "
+                f"expected event_type=order_terminal trade_id={pending.trade_id} "
+                f"journal_entry_id={record.get('journal_entry_id')}, "
+                f"got event_type={last.get('event_type')} "
+                f"trade_id={last.get('trade_id')} "
+                f"journal_entry_id={last.get('journal_entry_id')}"
+            )
         key = (pending.strategy, pending.order.ticker.upper())
         order_ids = self._pending_orders.get(key)
         if order_ids is not None:
@@ -2512,7 +2554,7 @@ class Engine:
                 # macOS, so we never hit this branch on the Mac Mini.
                 pass  # pragma: no cover
 
-    async def _shutdown(self) -> None:
+    async def _shutdown(self, *, reason: str = "graceful_shutdown") -> None:
         # Don't overwrite HALTED with SHUTDOWN -- the distinction
         # matters for invest-execute status reporting. HALTED means
         # engine refused to operate (needs investigation); SHUTDOWN
@@ -2527,7 +2569,7 @@ class Engine:
             self.journal.append(
                 "engine_stopped",
                 payload={
-                    "reason": "graceful_shutdown",
+                    "reason": reason,
                     "pending_order": (
                         self._pending_order.trade_id
                         if self._pending_order is not None
