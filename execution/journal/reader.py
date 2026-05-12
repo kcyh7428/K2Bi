@@ -10,6 +10,11 @@ from typing import Any, Iterable
 LOG = logging.getLogger("k2bi.journal.reader")
 
 
+def _drop_matching_value(mapping: dict[str, str], key: Any, value: str) -> None:
+    if key is not None and mapping.get(str(key)) == value:
+        mapping.pop(str(key), None)
+
+
 def _remaining_qty_is_zero(payload: dict[str, Any]) -> bool:
     raw = payload.get("remaining_qty")
     if raw is None:
@@ -85,4 +90,14 @@ def terminal_signals_by_trade_id(
             )
             continue
         out[indexed_trade_id] = event
+        _drop_matching_value(
+            trade_id_by_perm,
+            event.get("broker_perm_id"),
+            indexed_trade_id,
+        )
+        _drop_matching_value(
+            trade_id_by_order,
+            event.get("broker_order_id"),
+            indexed_trade_id,
+        )
     return out

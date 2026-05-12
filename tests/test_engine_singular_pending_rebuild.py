@@ -261,16 +261,29 @@ class EngineSingularPendingRebuildTests(unittest.IsolatedAsyncioTestCase):
             healed[0]["payload"]["heuristic_version"],
             "v1",
         )
+        first_heal_id = healed[0]["journal_entry_id"]
 
         restart_engine = self._make_engine()
         with mock.patch.object(
             restart_engine,
             "_journal_recovery_self_heals",
             wraps=restart_engine._journal_recovery_self_heals,
-        ) as heal_spy:
+        ) as heal_spy, mock.patch.object(
+            restart_engine.journal,
+            "append",
+            wraps=restart_engine.journal.append,
+        ) as append_spy:
             restart_tick = await restart_engine.tick_once()
 
         self.assertEqual(restart_tick.state_after, EngineState.CONNECTED_IDLE)
         self.assertIsNone(restart_engine._pending_order)
         self.assertEqual(heal_spy.call_count, 1)
-        self.assertEqual(len(self._self_heal_events()), 1)
+        duplicate_appends = [
+            call
+            for call in append_spy.call_args_list
+            if call.args and call.args[0] == "recovery_self_healed_pending_order"
+        ]
+        self.assertEqual(duplicate_appends, [])
+        healed_after_restart = self._self_heal_events()
+        self.assertEqual(len(healed_after_restart), 1)
+        self.assertEqual(healed_after_restart[0]["journal_entry_id"], first_heal_id)

@@ -88,6 +88,7 @@ LOG = logging.getLogger("k2bi.engine")
 RECONNECT_START_SECONDS = 5.0
 RECONNECT_MULT = 2.0
 RECONNECT_CAP_SECONDS = 300.0
+SELF_HEAL_DEDUPE_MAX_DAYS = 7
 DISCONNECT_STATUS_INTERVAL = timedelta(minutes=5)
 DEFAULT_TICK_SECONDS = 30.0
 DEFAULT_FILL_TIMEOUT_SECONDS = 60.0
@@ -2622,6 +2623,11 @@ class Engine:
         now = datetime.now(timezone.utc)
         since_utc = since.astimezone(timezone.utc)
         day_span = max((now.date() - since_utc.date()).days, 0)
+        if day_span > SELF_HEAL_DEDUPE_MAX_DAYS:
+            raise RuntimeError(
+                "journal self-heal dedupe lookback exceeded "
+                f"{SELF_HEAL_DEDUPE_MAX_DAYS} days: {day_span}"
+            )
         since_iso = since_utc.isoformat()
         for day_offset in range(day_span, -1, -1):
             when = now - timedelta(days=day_offset)
