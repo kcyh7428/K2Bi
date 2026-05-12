@@ -597,8 +597,9 @@ class Engine:
                 try:
                     await self._poll_awaiting(result)
                 except JournalDurabilityError as exc:
-                    await self._handle_journal_durability_error(exc)
-                    result.state_after = self.state
+                    result.state_after = await self._handle_journal_durability_error(
+                        exc
+                    )
                     return result
             result.state_after = self.state
             return result
@@ -614,8 +615,7 @@ class Engine:
         try:
             await self._run_tick_body(result)
         except JournalDurabilityError as exc:
-            await self._handle_journal_durability_error(exc)
-            result.state_after = self.state
+            result.state_after = await self._handle_journal_durability_error(exc)
             return result
         result.state_after = self.state
         return result
@@ -973,10 +973,11 @@ class Engine:
     async def _handle_journal_durability_error(
         self,
         exc: JournalDurabilityError,
-    ) -> None:
+    ) -> EngineState:
         LOG.error("engine: journal durability failure: %s", exc)
         self._shutdown_requested = True
         await self._shutdown(reason="journal_durability_failure")
+        return self.state
 
     async def _attempt_reconnect(self, result: TickResult) -> None:
         delay = _reconnect_delay(self._reconnect_attempts)
@@ -2053,7 +2054,11 @@ class Engine:
         )
         payload = last.get("payload")
         if not isinstance(payload, dict):
-            payload = {}
+            raise JournalDurabilityError(
+                "order_terminal write durability check failed: "
+                "read-back payload is not an object: "
+                f"got {type(payload).__name__} {payload!r}"
+            )
         if (
             last.get("event_type") != "order_terminal"
             or last.get("trade_id") != pending.trade_id
