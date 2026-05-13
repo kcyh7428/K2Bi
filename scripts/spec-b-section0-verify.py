@@ -17,12 +17,16 @@ from typing import Any
 from ib_async import IB
 
 
-BASELINE_AVG_COST = Decimal("32.0540875")
+BASELINE_AVG_COST = Decimal("31.3340875")
 AVG_COST_TOLERANCE = Decimal("0.16")
 EXPECTED_G_QTY = Decimal("71")
-EXPECTED_G_STOP_PERM_ID = 113371621
+EXPECTED_G_STOP_PERM_ID = 499958748
 EXPECTED_G_STOP_PRICE = Decimal("30")
-EXPECTED_G_STOP_STATUS = {"PreSubmitted", "Submitted"}
+EXPECTED_SPY_QTY = Decimal("2")
+EXPECTED_SPY_AVG_COST = Decimal("707.72")
+EXPECTED_SPY_STOP_PERM_ID = 1888063981
+EXPECTED_SPY_STOP_PRICE = Decimal("697.13")
+EXPECTED_STOP_STATUS = {"PreSubmitted", "Submitted"}
 KILL_PATH = Path.home() / "Projects" / "K2Bi-Vault" / "System" / ".killed"
 
 
@@ -48,7 +52,7 @@ def _position_rows(ib: IB) -> list[dict[str, Any]]:
     rows = []
     for pos in ib.positions():
         contract = pos.contract
-        if getattr(contract, "symbol", "") != "G":
+        if getattr(contract, "symbol", "") not in {"G", "SPY"}:
             continue
         rows.append(
             {
@@ -98,17 +102,31 @@ def _open_order_rows(ib: IB) -> list[dict[str, Any]]:
 
 
 def _verify_positions(rows: list[dict[str, Any]], failures: list[str]) -> None:
-    if len(rows) != 1:
-        failures.append(f"expected one G position, got {len(rows)}")
+    g_rows = [row for row in rows if row.get("symbol") == "G"]
+    if len(g_rows) != 1:
+        failures.append(f"expected one G position, got {len(g_rows)}")
         return
-    qty = _decimal(rows[0]["position"])
-    avg_cost = _decimal(rows[0]["avgCost"])
+    qty = _decimal(g_rows[0]["position"])
+    avg_cost = _decimal(g_rows[0]["avgCost"])
     if qty != EXPECTED_G_QTY:
         failures.append(f"expected G qty {EXPECTED_G_QTY}, got {qty}")
     if abs(avg_cost - BASELINE_AVG_COST) > AVG_COST_TOLERANCE:
         failures.append(
             "expected G avgCost within "
             f"{AVG_COST_TOLERANCE} of {BASELINE_AVG_COST}, got {avg_cost}"
+        )
+
+    spy_rows = [row for row in rows if row.get("symbol") == "SPY"]
+    if len(spy_rows) != 1:
+        failures.append(f"expected one SPY position, got {len(spy_rows)}")
+        return
+    spy_qty = _decimal(spy_rows[0]["position"])
+    spy_avg_cost = _decimal(spy_rows[0]["avgCost"])
+    if spy_qty != EXPECTED_SPY_QTY:
+        failures.append(f"expected SPY qty {EXPECTED_SPY_QTY}, got {spy_qty}")
+    if spy_avg_cost != EXPECTED_SPY_AVG_COST:
+        failures.append(
+            f"expected SPY avgCost {EXPECTED_SPY_AVG_COST}, got {spy_avg_cost}"
         )
 
 
@@ -138,10 +156,45 @@ def _verify_g_stop(rows: list[dict[str, Any]], failures: list[str]) -> None:
         failures.append(
             f"expected G stop price {EXPECTED_G_STOP_PRICE}, got {order.get('auxPrice')!r}"
         )
-    if order.get("status") not in EXPECTED_G_STOP_STATUS:
+    if order.get("status") not in EXPECTED_STOP_STATUS:
         failures.append(
             "expected G stop status in "
-            f"{sorted(EXPECTED_G_STOP_STATUS)}, got {order.get('status')!r}"
+            f"{sorted(EXPECTED_STOP_STATUS)}, got {order.get('status')!r}"
+        )
+
+
+def _verify_spy_stop(rows: list[dict[str, Any]], failures: list[str]) -> None:
+    spy_rows = [row for row in rows if row.get("symbol") == "SPY"]
+    if len(spy_rows) != 1:
+        failures.append(f"expected exactly one SPY open order, got {len(spy_rows)}")
+        return
+
+    order = spy_rows[0]
+    checks = {
+        "permId": EXPECTED_SPY_STOP_PERM_ID,
+        "action": "SELL",
+        "orderType": "STP",
+        "tif": "GTC",
+    }
+    for key, expected in checks.items():
+        if order.get(key) != expected:
+            failures.append(
+                f"expected SPY stop {key}={expected!r}, got {order.get(key)!r}"
+            )
+    if _decimal(order.get("totalQuantity")) != EXPECTED_SPY_QTY:
+        failures.append(
+            "expected SPY stop qty "
+            f"{EXPECTED_SPY_QTY}, got {order.get('totalQuantity')!r}"
+        )
+    if _decimal(order.get("auxPrice")) != EXPECTED_SPY_STOP_PRICE:
+        failures.append(
+            "expected SPY stop price "
+            f"{EXPECTED_SPY_STOP_PRICE}, got {order.get('auxPrice')!r}"
+        )
+    if order.get("status") not in EXPECTED_STOP_STATUS:
+        failures.append(
+            "expected SPY stop status in "
+            f"{sorted(EXPECTED_STOP_STATUS)}, got {order.get('status')!r}"
         )
 
 
@@ -182,6 +235,7 @@ def main() -> int:
     if broker_query_succeeded:
         _verify_positions(positions, failures)
         _verify_g_stop(open_orders, failures)
+        _verify_spy_stop(open_orders, failures)
 
     result = {
         "ts_utc": datetime.now(timezone.utc).isoformat(),
@@ -191,9 +245,17 @@ def main() -> int:
         "k2bi_engine_active": active,
         "k2bi_engine_enabled": enabled,
         "killed_present": killed_present,
-        "g_positions": positions,
+        "g_positions": [
+            row for row in positions if row.get("symbol") == "G"
+        ],
         "g_open_orders": [
             row for row in open_orders if row.get("symbol") == "G"
+        ],
+        "spy_positions": [
+            row for row in positions if row.get("symbol") == "SPY"
+        ],
+        "spy_open_orders": [
+            row for row in open_orders if row.get("symbol") == "SPY"
         ],
         "all_open_orders": open_orders,
         "failures": failures,

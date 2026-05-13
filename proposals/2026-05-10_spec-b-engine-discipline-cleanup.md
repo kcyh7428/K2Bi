@@ -32,19 +32,20 @@ plan-review-required: true
 Before any Spec B code lands, operator runs `scripts/gateway-query.sh -f <snippet.py>` (clientId=99) and confirms:
 
 - G qty = 71 shares
-- Exactly 1 G open order by durable identity: SELL STP 71 @ $30 GTC, permId 113371621, side SELL, stop_price 30, qty 71, status PreSubmitted or Submitted (verified via `reqAllOpenOrders()` to catch orphans bound to other clientIds)
+- Exactly 1 G open order by durable identity: SELL STP 71 @ $30 GTC, permId 499958748, side SELL, stop_price 30, qty 71, status PreSubmitted or Submitted (verified via `reqAllOpenOrders()` to catch orphans bound to other clientIds)
 - No other G orders visible
 - Engine systemd unit (`k2bi-engine.service`) reports `inactive` AND `disabled` at the moment of verify (not just "supposed to be")
 
 **Cost basis tolerance (corporate-action sentinel):**
 
-- avgCost change ≤ 0.5% from baseline ($32.0540875 ± $0.16/share; new window: $31.89 to $32.21): informational only, recorded in the §0 log line, does not block
+- avgCost change ≤ 0.5% from baseline ($31.3340875 ± $0.16/share; new window: $31.17 to $31.49): informational only, recorded in the §0 log line, does not block
 - avgCost change > 0.5% with qty unchanged: STOP. File incident note. Investigate corporate action (split, reverse split, spin-off) before any code lands. The 0.5% threshold catches material economic exposure changes while ignoring routine T+2 commission settlement (~14bps observed on this position)
 
 **Baseline re-anchor history:**
 
 - $32.8295 from 2026-05-08 pre-incident state through 2026-05-11 regression test
-- $32.0540875 from 2026-05-12 onward (re-anchored by K2B-architect 2026-05-12 02:30 HKT after planned regression-test round-trip; rationale in `K2Bi-Vault/wiki/insights/2026-05-12_spec-b-section8-1-section0-cascade-blockers.md` + K2B PM session transcript)
+- $32.0540875 from 2026-05-12 02:30 HKT through the 2026-05-12 regression round-trip (re-anchored by K2B-architect after planned regression-test round-trip; rationale in `K2Bi-Vault/wiki/insights/2026-05-12_spec-b-section8-1-section0-cascade-blockers.md` + K2B PM session transcript)
+- $31.3340875 from 2026-05-13 onward (re-anchored after the 2026-05-12 regression round-trip changed G avgCost; tolerance remains ± $0.16/share)
 
 **Known §0 limitations:**
 
@@ -256,7 +257,7 @@ If an orphan order is detected via `reqAllOpenOrders()`:
 
 `tests/test_engine_master_client_id.py`:
 
-M1 (config-presence, operator-verified): verified by §7 engine-re-enable-checklist via `ssh hostinger 'grep MasterClientID /home/ibgateway/ibc/config.ini'`. No CI pytest assertion (config lives on VPS, not in repo).
+M1 (config-presence, operator-verified): verified by §7 engine-re-enable-checklist via `scripts/ssh-vps.sh 'grep MasterClientID /home/ibgateway/ibc/config.ini'`. No CI pytest assertion (config lives on VPS, not in repo).
 
 M2 (visibility-confirmation contract): inline comment in `execution/connectors/ibkr.py` documents that clientId 99 connections see all orders via `reqAllOpenOrders()` but can only cancel their own orders. Behavior contract documented in code, not test-enforced.
 
@@ -305,7 +306,7 @@ Address all seven findings tracked in `wiki/concepts/feature_k2bi-discipline-cle
 - [ ] All §1-§4 red-then-green tests pass in CI.
 - [ ] Full pytest suite green (`pytest tests/`).
 - [ ] Before any `ib-gateway.service` restart for §5 config maintenance: verify `k2bi-engine.service` is inactive AND disabled, and verify `~/Projects/K2Bi-Vault/System/.killed` is absent.
-- [ ] §5 MasterClientID=99 visibility config verified via `ssh hostinger 'grep MasterClientID /home/ibgateway/ibc/config.ini'` (expected active IBC key: `OverrideTwsMasterClientID=99`) and `systemctl status ib-gateway.service` active with uptime since the config edit.
+- [ ] §5 MasterClientID=99 visibility config verified via `scripts/ssh-vps.sh 'grep MasterClientID /home/ibgateway/ibc/config.ini'` (expected active IBC key: `OverrideTwsMasterClientID=99`) and `systemctl status ib-gateway.service` active with uptime since the config edit.
 - [ ] `wiki/concepts/feature_k2bi-discipline-cleanup.md` has an accurate "Known §5 limitations" section.
 - [ ] §0 pre-open re-verify state has not drifted (re-run `gateway-query.sh` clientId=99 on the day of re-enable).
 - [ ] `wiki/log.md` line written via `scripts/wiki-log-append.sh`.

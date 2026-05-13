@@ -28,7 +28,7 @@ operator completes every checkbox below and manually runs the final command.
 Run from the MacBook:
 
 ```bash
-ssh hostinger 'systemctl is-active k2bi-engine.service; systemctl is-enabled k2bi-engine.service'
+scripts/ssh-vps.sh 'systemctl is-active k2bi-engine.service; systemctl is-enabled k2bi-engine.service'
 ```
 
 Expected:
@@ -43,7 +43,7 @@ disabled
 Run:
 
 ```bash
-ssh hostinger 'test ! -e ~/Projects/K2Bi-Vault/System/.killed && echo ".killed absent"'
+scripts/ssh-vps.sh 'test ! -e ~/Projects/K2Bi-Vault/System/.killed && echo ".killed absent"'
 ```
 
 - [ ] `.killed absent` is verified.
@@ -53,7 +53,7 @@ ssh hostinger 'test ! -e ~/Projects/K2Bi-Vault/System/.killed && echo ".killed a
 Run:
 
 ```bash
-ssh hostinger 'grep MasterClientID /home/ibgateway/ibc/config.ini'
+scripts/ssh-vps.sh 'grep MasterClientID /home/ibgateway/ibc/config.ini'
 ```
 
 Expected config line:
@@ -74,7 +74,7 @@ authority.
 Run:
 
 ```bash
-ssh hostinger 'systemctl is-active ib-gateway.service; systemctl show -p ActiveEnterTimestamp ib-gateway.service'
+scripts/ssh-vps.sh 'systemctl is-active ib-gateway.service; systemctl show -p ActiveEnterTimestamp ib-gateway.service'
 ```
 
 - [ ] `ib-gateway.service` is active and has uptime after the MasterClientID=99 config edit.
@@ -95,12 +95,15 @@ refuses `clientId=1`.
 Expected broker state:
 
 - [ ] G position qty is 71.
-- [ ] G avgCost is within 0.5% of the baseline 32.0540875 ± $0.16/share.
-      See Spec B §0 Baseline re-anchor history for the 2026-05-12 ruling.
+- [ ] G avgCost is within 0.5% of the baseline 31.3340875 ± $0.16/share.
+      See Spec B §0 Baseline re-anchor history for the 2026-05-13 ruling.
 - [ ] Exactly one G open STP SELL order exists by durable identity:
-      permId 113371621, qty 71, stop 30, status PreSubmitted or Submitted.
+      permId 499958748, qty 71, stop 30, status PreSubmitted or Submitted.
       `parentId` is informational after daily reauth; see Spec B §0 Known
       limitations.
+- [ ] SPY position qty is 2, avgCost is 707.72, and exactly one SPY open STP
+      SELL order exists by durable identity: permId 1888063981, qty 2, stop
+      697.13, status PreSubmitted or Submitted.
 - [ ] No Spec B test orders remain open.
 
 Write the audit line:
