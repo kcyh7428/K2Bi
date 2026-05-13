@@ -1,3 +1,15 @@
+## 2026-05-13 -- Spec B live regression PASS and Section 0 baseline refreshed
+
+**Scope:** Recorded the PASS outcome from the post-Spec-B live regression rerun and re-anchored the Section 0 broker baseline after the planned G round-trip changed cost basis and created a fresh broker-held stop.
+
+**Live validation:** During US regular market hours, Phase A.2 flattened G via operator-authorized clientId=88 `SELL 71 G MKT` (`permId=1677427044`, avg fill `$30.51`). Operator re-enabled `k2bi-engine.service`; the first start refused as expected with `journal_position_missing_at_broker` for G, then the documented one-shot `K2BI_ALLOW_RECOVERY_MISMATCH=1` systemd drop-in allowed startup and was removed immediately after restart. The engine submitted exactly one G BUY 71 MKT (`broker_order_id=95`, `broker_perm_id=1677427048`), journaled `order_filled` plus `order_terminal{Filled}`, and broker state showed exactly one child SELL STP 71 G @ `$30` (`orderId=96`, `permId=1677427049`) with `parentId=95` at submission-time verification. Five post-fill cycles emitted `cycle_evaluated_skip_position_held` with `current_qty=71` and `target_qty=71`. No rapid-fire event, no duplicate BUY, no orphan G order.
+
+**Baseline refresh:** Updated the Spec B Section 0 baseline to broker avgCost `$30.334087507042256` and the durable G STP identity to `permId=1677427049`. This keeps the next Section 0 verify aligned with the broker state produced by the passing regression test.
+
+**Vault updates:** Resume Card records the 2026-05-13 PASS, `K2Bi-Vault/System/memory/active_rules.md` no longer carries E-2026-05-09-001 as an active gate, and `self_improve_learnings.md` retains it as a retired historical rule.
+
+**Verification:** `python3 -m py_compile` equivalent via `py_compile.compile(..., cfile="/tmp/spec-b-section0-verify.pyc", doraise=True)` passed for `scripts/spec-b-section0-verify.py`.
+
 ## 2026-05-11 -- Spec B engine-discipline cleanup shipped through operator re-enable runbook
 
 **Scope:** Landed Spec B sections 1 through 7 without re-enabling the engine. This final pass closed Section 6 deferred findings F1, F3, F4, F6, and F7, then added the Section 7 operator-only engine re-enable checklist.

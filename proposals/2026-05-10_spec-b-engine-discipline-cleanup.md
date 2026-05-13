@@ -32,20 +32,21 @@ plan-review-required: true
 Before any Spec B code lands, operator runs `scripts/gateway-query.sh -f <snippet.py>` (clientId=99) and confirms:
 
 - G qty = 71 shares
-- Exactly 1 G open order by durable identity: SELL STP 71 @ $30 GTC, permId 499958748, side SELL, stop_price 30, qty 71, status PreSubmitted or Submitted (verified via `reqAllOpenOrders()` to catch orphans bound to other clientIds)
+- Exactly 1 G open order by durable identity: SELL STP 71 @ $30 GTC, permId 1677427049, side SELL, stop_price 30, qty 71, status PreSubmitted or Submitted (verified via `reqAllOpenOrders()` to catch orphans bound to other clientIds)
 - No other G orders visible
 - Engine systemd unit (`k2bi-engine.service`) reports `inactive` AND `disabled` at the moment of verify (not just "supposed to be")
 
 **Cost basis tolerance (corporate-action sentinel):**
 
-- avgCost change ≤ 0.5% from baseline ($31.3340875 ± $0.16/share; new window: $31.17 to $31.49): informational only, recorded in the §0 log line, does not block
+- avgCost change ≤ 0.5% from baseline ($30.334087507042256 ± $0.16/share; new window: $30.17 to $30.49): informational only, recorded in the §0 log line, does not block
 - avgCost change > 0.5% with qty unchanged: STOP. File incident note. Investigate corporate action (split, reverse split, spin-off) before any code lands. The 0.5% threshold catches material economic exposure changes while ignoring routine T+2 commission settlement (~14bps observed on this position)
 
 **Baseline re-anchor history:**
 
 - $32.8295 from 2026-05-08 pre-incident state through 2026-05-11 regression test
 - $32.0540875 from 2026-05-12 02:30 HKT through the 2026-05-12 regression round-trip (re-anchored by K2B-architect after planned regression-test round-trip; rationale in `K2Bi-Vault/wiki/insights/2026-05-12_spec-b-section8-1-section0-cascade-blockers.md` + K2B PM session transcript)
-- $31.3340875 from 2026-05-13 onward (re-anchored after the 2026-05-12 regression round-trip changed G avgCost; tolerance remains ± $0.16/share)
+- $31.3340875 from 2026-05-13 through the 2026-05-13 regression round-trip (re-anchored after the 2026-05-12 regression round-trip changed G avgCost; tolerance remained ± $0.16/share)
+- $30.334087507042256 from 2026-05-13 onward (re-anchored after the 2026-05-13 regression test PASS round-trip; old baseline $31.3340875; new broker-held G STP durable identity permId 1677427049; rationale in `K2Bi-Vault/wiki/planning/index.md` Manual override 2026-05-13 + regression plan Phase F.3)
 
 **Known §0 limitations:**
 

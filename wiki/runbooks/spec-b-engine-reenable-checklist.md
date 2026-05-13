@@ -95,10 +95,10 @@ refuses `clientId=1`.
 Expected broker state:
 
 - [ ] G position qty is 71.
-- [ ] G avgCost is within 0.5% of the baseline 31.3340875 ± $0.16/share.
+- [ ] G avgCost is within 0.5% of the baseline 30.334087507042256 ± $0.16/share.
       See Spec B §0 Baseline re-anchor history for the 2026-05-13 ruling.
 - [ ] Exactly one G open STP SELL order exists by durable identity:
-      permId 499958748, qty 71, stop 30, status PreSubmitted or Submitted.
+      permId 1677427049, qty 71, stop 30, status PreSubmitted or Submitted.
       `parentId` is informational after daily reauth; see Spec B §0 Known
       limitations.
 - [ ] SPY position qty is 2, avgCost is 707.72, and exactly one SPY open STP
