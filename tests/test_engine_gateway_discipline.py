@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
@@ -131,6 +132,77 @@ def test_gateway_query_script_enforces_allocator_and_operator_context() -> None:
     assert "trap" in script
     assert "release" in script
     assert "Convention (NOT enforced)" not in script
+
+
+def _run_ssh_guard(
+    command: str,
+    *,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    payload = {"tool_input": {"command": command}}
+    env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
+    return subprocess.run(
+        [str(REPO_ROOT / ".claude" / "hooks" / "ssh-guard.sh")],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+
+
+def test_ssh_guard_blocks_raw_vps_ssh_and_override() -> None:
+    """SSH circuit breaker enforcement must block raw VPS SSH and override abuse."""
+    raw = _run_ssh_guard("ssh -o ConnectTimeout=5 k2bi@hostinger 'echo ok'")
+    assert raw.returncode == 2
+    assert "BLOCKED" in raw.stderr
+    assert "scripts/ssh-vps.sh" in raw.stderr
+
+    override = _run_ssh_guard(
+        "K2BI_SSH_OVERRIDE=human-debug scripts/ssh-vps.sh 'echo ok'"
+    )
+    assert override.returncode == 2
+    assert "K2BI_SSH_OVERRIDE" in override.stderr
+
+    inherited_override = _run_ssh_guard(
+        "scripts/ssh-vps.sh 'echo ok'",
+        extra_env={"K2BI_SSH_OVERRIDE": "human-debug"},
+    )
+    assert inherited_override.returncode == 2
+    assert "K2BI_SSH_OVERRIDE" in inherited_override.stderr
+
+    nested_override = _run_ssh_guard(
+        "bash -c \"K2BI_SSH_OVERRIDE=human-debug scripts/ssh-vps.sh true\""
+    )
+    assert nested_override.returncode == 2
+    assert "K2BI_SSH_OVERRIDE" in nested_override.stderr
+
+
+def test_ssh_guard_allows_wrappers_and_grep_audits() -> None:
+    """The guard must allow wrapper calls and repo audits that mention raw SSH."""
+    wrapper = _run_ssh_guard("scripts/ssh-vps.sh 'echo ok'")
+    assert wrapper.returncode == 0
+
+    transport = _run_ssh_guard(
+        "rsync -e scripts/ssh-vps-transport.sh a k2bi@hostinger:b"
+    )
+    assert transport.returncode == 0
+
+    audit = _run_ssh_guard("rg 'ssh " + "hostinger' .")
+    assert audit.returncode == 0
+
+    override_audit = _run_ssh_guard("rg 'K2BI_SSH_OVERRIDE=' .")
+    assert override_audit.returncode == 0
+
+    injection = _run_ssh_guard("echo scripts/ssh-vps.sh && ssh " + "hostinger")
+    assert injection.returncode == 2
+    assert "raw SSH" in injection.stderr
+
+    remote_arg = _run_ssh_guard("ssh k2bi@innocent-host " + "hostinger")
+    assert remote_arg.returncode == 2
+    assert "raw SSH" in remote_arg.stderr
 
 
 def test_review_directory_is_not_gitignored() -> None:

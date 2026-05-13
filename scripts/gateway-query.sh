@@ -32,6 +32,7 @@ SSH_USER="k2bi"
 REMOTE_REPO="/home/${SSH_USER}/Projects/K2Bi"
 REMOTE_PYTHON="${REMOTE_REPO}/.venv/bin/python3"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SSH_TRANSPORT="${REPO_ROOT}/scripts/ssh-vps-transport.sh"
 LOCAL_PYTHON="${PYTHON:-python3}"
 CLIENTID_ALLOCATOR="${REPO_ROOT}/scripts/lib/clientid_allocator.py"
 CLIENTID_LEASE_DIR="${K2BI_GATEWAY_CLIENTID_LEASE_DIR:-${TMPDIR:-/tmp}/k2bi-gateway-clientids}"
@@ -133,7 +134,7 @@ trap release_clientid_lease EXIT
 # Pipe snippet via stdin to ssh -> remote python3 (no shell interpolation).
 # ConnectTimeout fails fast if VPS unreachable; ServerAliveInterval keeps long
 # queries from hanging silently on a dropped connection.
-printf '%s\n' "$SNIPPET" | ssh \
+printf '%s\n' "$SNIPPET" | "$SSH_TRANSPORT" \
     -o ConnectTimeout=10 \
     -o ServerAliveInterval=15 \
     -o ServerAliveCountMax=4 \

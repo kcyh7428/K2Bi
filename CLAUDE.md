@@ -32,7 +32,7 @@ Execute. Don't explain what you're about to do. Just do it. If you need clarific
 - **Vault**: `~/Projects/K2Bi-Vault/` (Syncthing-managed plain directory, NOT a git repo)
 - **Code repo**: `~/Projects/K2Bi/` on GitHub at `https://github.com/kcstudio/K2Bi`
 - **Broker**: IBKR HK demo paper account. IB Gateway runs on the VPS at `127.0.0.1:4002` (localhost-only, Read-Only API on). The engine connects to it natively. Operator one-off queries from the MacBook go through `scripts/gateway-query.sh`, never directly. No live funding until Phase 5 metrics pass.
-- **Hostinger VPS**: `ssh hostinger`. Trader tier host. Code deployed via `/sync`. Vault synced via Syncthing. Engine runs under systemd (`k2bi-engine.service`).
+- **Hostinger VPS**: use `scripts/ssh-vps.sh` for agent SSH. Trader tier host. Code deployed via `/sync`. Vault synced via Syncthing. Engine runs under systemd (`k2bi-engine.service`).
 - **MiniMax API** (M2.7) -- worker model for bulk extraction. API key in `MINIMAX_API_KEY`.
 - **NotebookLM** -- first-class research pillar via `notebooklm-py` and the `notebooklm` skill.
 - **MCP servers**: `netanelavr/trading-mcp` planned Phase 2. IBKR via direct `ib_async` Python SDK, NOT MCP.
@@ -57,6 +57,16 @@ Why: prompt-text rules fail under cognitive load. "Never exceed 5% position size
 **Read-side counterpart (added 2026-05-08):** the same isolation applies to broker reads. Claude in any session -- coaching, drafting, review, observer -- does NOT open its own broker connection. Live broker state (NAV, positions, open orders, kill-switch metadata, last-broker-error class) is published by the engine to vault snapshots; sessions read those snapshots. If a workflow needs live state and no engine snapshot exists, the answer is to extend the engine, NOT to open a session-side `ib_async` connection. The single exception is `scripts/gateway-query.sh`, which is operator-forensics ONLY (incident debugging, ad-hoc account checks); skill bodies and skill-driven workflows MUST NOT call it. The engine snapshot pipeline is tracked in `K2Bi-Vault/wiki/planning/feature_engine-vault-snapshots.md`. Motivating incident: 2026-05-08 outage (commit `8b94436` retrospective + L-2026-05-08-001).
 
 **clientId convention (related to read-side):** clientId `1` is reserved for the engine. Ad-hoc operator queries via `gateway-query.sh` and any future skill that legitimately opens `ib_async` use `90-99`. Backtests + any other ib_async caller (Phase 4+ walk-forward harness, future broker-data tools) use the 90-99 range. **Never pick `1` from a session.** Picking `1` kicks the engine off the gateway and triggers the orphan-STOP recovery path that Q42 was patched against. The convention is documented (here + in `gateway-query.sh` comments) but not yet code-enforced; enforcement belongs with the engine snapshot pipeline ship.
+
+## SSH Discipline
+
+All agent and skill SSH calls to the VPS go through `scripts/ssh-vps.sh`. `rsync` callers use `scripts/ssh-vps-transport.sh` via `rsync -e`. Direct Hostinger SSH commands are blocked by the PreToolUse hook.
+
+Exit `78` from the wrapper means the SSH circuit is open. Stop, surface it to the operator, and do not auto-retry. The cooldown is 10 minutes.
+
+Human emergency-debug override: `K2BI_SSH_OVERRIDE=human-debug K2BI_SSH_OVERRIDE_REASON="<reason>" scripts/ssh-vps.sh ...`. This is a single attempt, no retry, and logged loudly. Automation never sets the override; the PreToolUse hook blocks it in automation contexts.
+
+Operating rule: one active SSH automation host at a time. The MacBook is current. If a second host becomes a real agent runner, install the wrapper there and document the routing in this file.
 
 ## Memory Layer Ownership
 

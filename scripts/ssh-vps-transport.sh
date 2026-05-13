@@ -6,9 +6,9 @@ set -euo pipefail
 
 STATE_DIR="${HOME}/.cache/k2bi/ssh"
 LOCKDIR="${STATE_DIR}/lock.d"
+LOCK_PID="${LOCKDIR}/pid"
 COOLDOWN="${STATE_DIR}/cooldown"
 COOLDOWN_SEC=600
-LOCK_STALE_SEC=120
 cooldown_tmp=""
 
 mkdir -p "$STATE_DIR"
@@ -30,33 +30,69 @@ if [[ -f "$COOLDOWN" ]]; then
     rm -f "$COOLDOWN"
 fi
 
-lock_mtime_epoch() {
-    stat -f %m "$LOCKDIR" 2>/dev/null || stat -c %Y "$LOCKDIR" 2>/dev/null || printf '0'
+write_lock_pid() {
+    if ! printf '%s\n' "$$" > "$LOCK_PID"; then
+        rm -f "$LOCK_PID" 2>/dev/null || true
+        rmdir "$LOCKDIR" 2>/dev/null || true
+        echo "ssh-vps: could not write lock pid; refusing fail-closed." >&2
+        exit 78
+    fi
+}
+
+read_lock_pid() {
+    local pid
+    pid="$(cat "$LOCK_PID" 2>/dev/null || true)"
+    case "$pid" in
+        ''|*[!0-9]*) return 1 ;;
+        *) printf '%s\n' "$pid" ;;
+    esac
+}
+
+pid_is_alive() {
+    local pid="$1"
+    kill -0 "$pid" 2>/dev/null
+}
+
+reclaim_lock() {
+    local pid="${1:-unknown}"
+    echo "ssh-vps: removing stale lock for pid=${pid}." >&2
+    rm -f "$LOCK_PID" 2>/dev/null || true
+    if rmdir "$LOCKDIR" 2>/dev/null && mkdir "$LOCKDIR" 2>/dev/null; then
+        write_lock_pid
+        return 0
+    fi
+    echo "ssh-vps: stale lock could not be reclaimed; refusing." >&2
+    return 1
 }
 
 acquire_lock() {
     if mkdir "$LOCKDIR" 2>/dev/null; then
+        write_lock_pid
         return 0
     fi
 
-    now="$(date +%s)"
-    lock_mtime="$(lock_mtime_epoch)"
-    case "$lock_mtime" in
-        ''|*[!0-9]*) lock_mtime=0 ;;
-    esac
-    if (( lock_mtime > 0 && now - lock_mtime >= LOCK_STALE_SEC )); then
-        echo "ssh-vps: removing stale lock older than ${LOCK_STALE_SEC}s." >&2
-        if rmdir "$LOCKDIR" 2>/dev/null; then
-            if mkdir "$LOCKDIR" 2>/dev/null; then
-                return 0
-            fi
-        else
-            echo "ssh-vps: stale lock could not be removed; refusing." >&2
+    local holder_pid
+    if holder_pid="$(read_lock_pid)"; then
+        if pid_is_alive "$holder_pid"; then
+            echo "ssh-vps: another attempt in flight, refusing concurrent caller." >&2
+            return 1
         fi
+        reclaim_lock "$holder_pid"
+        return $?
     fi
 
-    echo "ssh-vps: another attempt in flight, refusing concurrent caller." >&2
-    return 1
+    # Grace window for the mkdir-then-write race in a just-started lock holder.
+    sleep 1
+    if holder_pid="$(read_lock_pid)"; then
+        if pid_is_alive "$holder_pid"; then
+            echo "ssh-vps: another attempt in flight, refusing concurrent caller." >&2
+            return 1
+        fi
+        reclaim_lock "$holder_pid"
+        return $?
+    fi
+
+    reclaim_lock "missing"
 }
 
 if ! acquire_lock; then
@@ -64,6 +100,7 @@ if ! acquire_lock; then
 fi
 
 cleanup() {
+    rm -f "$LOCK_PID" 2>/dev/null || true
     rmdir "$LOCKDIR" 2>/dev/null || true
     if [[ -n "${cooldown_tmp:-}" ]]; then
         rm -f "$cooldown_tmp"

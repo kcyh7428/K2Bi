@@ -42,7 +42,7 @@ Do NOT auto-sync without Keith's confirmation. Always ask first.
 
 - Deploy script: `~/Projects/K2Bi/scripts/deploy-to-vps.sh`
 - Config source of truth: `~/Projects/K2Bi/scripts/deploy-config.yml`
-- Hostinger VPS SSH alias: `hostinger`
+- Hostinger VPS SSH path: `scripts/ssh-vps.sh`
 - Remote K2Bi project: `/home/k2bi/Projects/K2Bi/` on Hostinger VPS
 
 ## Workflow
@@ -152,13 +152,13 @@ Or force a single category (any value from `list-categories`):
 
 ### 4. Verify
 
-After sync completes, confirm the Mini received what we intended.
+After sync completes, confirm the VPS received what we intended.
 
 **Skills category (always verifiable):**
 
 ```bash
-ssh hostinger "head -3 /home/k2bi/Projects/K2Bi/CLAUDE.md"
-ssh hostinger "ls /home/k2bi/Projects/K2Bi/.claude/skills/ | wc -l"
+scripts/ssh-vps.sh "head -3 /home/k2bi/Projects/K2Bi/CLAUDE.md"
+scripts/ssh-vps.sh "ls /home/k2bi/Projects/K2Bi/.claude/skills/ | wc -l"
 ```
 
 The deploy script itself runs a skill-count sanity check at the end of a skills sync -- use its output as the primary signal.

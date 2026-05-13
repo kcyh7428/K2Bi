@@ -43,7 +43,7 @@ Trigger one tick of the engine main loop.
 IB Gateway and the engine both run on the VPS. The engine connects to the gateway natively at `127.0.0.1:4002`. Manually triggering one tick from the MacBook means SSH'ing to the VPS and invoking the engine module there:
 
 ```bash
-ssh k2bi@hostinger "cd ~/Projects/K2Bi && .venv/bin/python3 -m execution.engine.main --once"
+scripts/ssh-vps.sh "cd ~/Projects/K2Bi && .venv/bin/python3 -m execution.engine.main --once"
 ```
 
 The `k2bi-engine.service` systemd unit is the normal driver; `--once` is for ad-hoc operator ticks only. Do NOT try to run the engine on the MacBook -- it cannot reach the gateway and there is no tunnel by design.
