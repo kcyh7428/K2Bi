@@ -59,10 +59,17 @@ from ..connectors.types import (
     DisconnectedError,
     IBKRConnectorProtocol,
     LIVE_ORDER_STATUSES,
+    POSITION_SOURCE_DISCONNECTED,
+    PositionSnapshot,
     TERMINAL_ORDER_STATUSES,
 )
 from ..journal.reader import terminal_signals_by_trade_id
-from ..journal.schema import reject_non_finite_json_constant
+from ..journal.schema import (
+    ABORT_PHASE_PRE_SUBMIT_RECHECK,
+    reject_non_finite_json_constant,
+    validate_cycle_skipped_position_query_failed_payload,
+    validate_position_visibility_lost_payload,
+)
 from ..journal.ulid import new_ulid
 from ..journal.writer import JournalWriter
 from ..risk import cash_only, kill_switch
@@ -91,6 +98,7 @@ RECONNECT_CAP_SECONDS = 300.0
 SELF_HEAL_DEDUPE_MAX_DAYS = 7
 DISCONNECT_STATUS_INTERVAL = timedelta(minutes=5)
 DEFAULT_TICK_SECONDS = 30.0
+POSITION_CACHE_MAX_AGE_SECONDS = 90
 DEFAULT_FILL_TIMEOUT_SECONDS = 60.0
 # Q33 (MiniMax R1 finding #3, 2026-04-21): cap the pre-exit barrier
 # wait so a misconfigured deployment cannot hang --once indefinitely.
@@ -117,6 +125,18 @@ DEFAULT_REGIME_FILE = (
 DEFAULT_RAPID_FIRE_CLEAR_PATH = (
     Path.home() / "Projects" / "K2Bi-Vault" / "System" / ".rapid-fire-cleared.json"
 )
+
+
+def _require_valid_position_snapshot(
+    snapshot: PositionSnapshot,
+    *,
+    phase: str,
+) -> list[BrokerPosition]:
+    if not snapshot.valid:
+        raise DisconnectedError(
+            f"broker position visibility invalid during {phase}: {snapshot.source}"
+        )
+    return list(snapshot.positions)
 
 
 class EngineState(str, Enum):
@@ -290,6 +310,10 @@ class Engine:
     _strategies: list[ApprovedStrategySnapshot] = field(default_factory=list)
     _strategy_drift_warned: set[str] = field(default_factory=set)
     _positions: list[BrokerPosition] = field(default_factory=list)
+    _positions_prev: list[BrokerPosition] = field(default_factory=list)
+    _positions_refreshed_at: datetime | None = None
+    _position_visibility_valid: bool = False
+    _position_source: str | None = None
     _pending_order: AwaitingOrderState | None = None
     _pending_orders: dict[tuple[str, str], set[str]] = field(default_factory=dict)
     _rapid_fire_window: dict[tuple[str, str], deque[datetime]] = field(
@@ -672,7 +696,11 @@ class Engine:
         narrow_lookback_start = startup_now - recovery_mod.DEFAULT_LOOKBACK
         ext_lookback_start = startup_now - recovery_mod.EXTENDED_CHECKPOINT_LOOKBACK
         try:
-            broker_positions = await self.connector.get_positions()
+            position_snapshot = await self.connector.get_positions()
+            broker_positions = _require_valid_position_snapshot(
+                position_snapshot,
+                phase="startup_recovery",
+            )
             broker_open_orders = await self.connector.get_open_orders()
             # broker_status uses the narrow window: order-status history
             # is recent broker activity, not a state checkpoint, and
@@ -763,6 +791,10 @@ class Engine:
 
         # Adopt broker state as engine state.
         self._positions = reco.adopted_positions
+        self._positions_prev = []
+        self._positions_refreshed_at = position_snapshot.fetched_at
+        self._position_source = position_snapshot.source
+        self._position_visibility_valid = True
         self._journal_recovery_self_heals(
             journal_tail,
             since=narrow_lookback_start,
@@ -1152,6 +1184,11 @@ class Engine:
                 return
             # EOD does not block the rest of tick; fall through.
 
+        if not await self._refresh_positions_at_cycle_top(result):
+            return
+        if self.state == EngineState.DISCONNECTED:
+            return
+
         # Drift-check approved strategies (file-level hash comparison).
         for snap in self._strategies:
             if snap.name in self._strategy_drift_warned:
@@ -1228,6 +1265,9 @@ class Engine:
             LOG.error("runner position-held skip detail malformed: %s", exc)
             return False
         try:
+            position_age_seconds = self._position_age_seconds(ctx.now)
+            if self._position_source is None or position_age_seconds is None:
+                raise ValueError("position visibility metadata unavailable")
             strategy_runner.journal_cycle_evaluated_skip_position_held(
                 journal=self.journal,
                 snapshot=snap,
@@ -1235,6 +1275,9 @@ class Engine:
                 market=market,
                 current_qty=current_qty,
                 cycle_id=new_ulid(),
+                position_source=self._position_source,
+                position_age_seconds=position_age_seconds,
+                position_visibility_valid=self._position_visibility_valid,
             )
         except Exception as exc:
             LOG.error("runner position-held observability write failed: %s", exc)
@@ -1758,6 +1801,95 @@ class Engine:
         except FileNotFoundError:
             return
 
+    def _position_age_seconds(self, now: datetime) -> float | None:
+        fetched_at = self._positions_refreshed_at
+        if fetched_at is None:
+            return None
+        if fetched_at.tzinfo is None:
+            fetched_at = fetched_at.replace(tzinfo=timezone.utc)
+        else:
+            fetched_at = fetched_at.astimezone(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        else:
+            now = now.astimezone(timezone.utc)
+        return max(0.0, (now - fetched_at).total_seconds())
+
+    def _journal_position_visibility_lost(
+        self,
+        *,
+        cycle_id: str,
+        source: str,
+        now: datetime,
+    ) -> None:
+        payload = {
+            "cycle_id": cycle_id,
+            "source": source,
+            "last_valid_age_seconds": self._position_age_seconds(now),
+        }
+        validate_position_visibility_lost_payload(payload)
+        self.journal.append("position_visibility_lost", payload=payload)
+
+    async def _refresh_positions_at_cycle_top(self, result: TickResult) -> bool:
+        now = datetime.now(timezone.utc)
+        cycle_id = new_ulid()
+        try:
+            snapshot = await self.connector.get_positions()
+        except AuthRequiredError as exc:
+            await self._enter_disconnected(result, exc, auth=True)
+            return False
+        except (DisconnectedError, ConnectorError) as exc:
+            await self._enter_disconnected(result, exc)
+            return False
+
+        if not snapshot.valid:
+            self._position_visibility_valid = False
+            self._position_source = snapshot.source
+            self._journal_position_visibility_lost(
+                cycle_id=cycle_id,
+                source=snapshot.source,
+                now=now,
+            )
+            if snapshot.source == POSITION_SOURCE_DISCONNECTED:
+                await self._enter_disconnected(
+                    result,
+                    DisconnectedError("broker position visibility disconnected"),
+                )
+            return False
+
+        fetched_at = snapshot.fetched_at
+        if fetched_at is None:
+            self._position_visibility_valid = False
+            self._position_source = snapshot.source
+            self._journal_position_visibility_lost(
+                cycle_id=cycle_id,
+                source=snapshot.source,
+                now=now,
+            )
+            return False
+        fetched_for_age = (
+            fetched_at.replace(tzinfo=timezone.utc)
+            if fetched_at.tzinfo is None
+            else fetched_at.astimezone(timezone.utc)
+        )
+        snapshot_age = max(0.0, (now - fetched_for_age).total_seconds())
+        if snapshot_age > POSITION_CACHE_MAX_AGE_SECONDS:
+            self._position_visibility_valid = False
+            self._position_source = snapshot.source
+            self._journal_position_visibility_lost(
+                cycle_id=cycle_id,
+                source=snapshot.source,
+                now=now,
+            )
+            return False
+
+        self._positions_prev = list(self._positions)
+        self._positions = list(snapshot.positions)
+        self._positions_refreshed_at = fetched_at
+        self._position_source = snapshot.source
+        self._position_visibility_valid = True
+        return True
+
     async def _skip_buy_for_existing_position(
         self,
         *,
@@ -1769,24 +1901,42 @@ class Engine:
         abort_phase: str,
     ) -> bool:
         """Residual TOCTOU window (~50-100ms between second `get_positions()` and broker `placeOrder()`) is qualitatively different from the 5/8 incident root cause. The 5/8 incident was the ABSENCE of any position check, not a race condition. §1 closes the absence. The residual window is closed by Spec B's defense-in-depth: §2 (journaled order_id dedup) + §3 (rapid-fire circuit breaker). Hardening the residual window inside §1 alone (e.g. via client_order_id idempotency token) would either duplicate §2's dedup mechanism or force ib_async-side broker-API features that are out of §1 scope. §1 ship discipline: close the named bug, leave defense-in-depth to layered defenses. Architect override of Kimi finding 2; reviewer was technically correct but scope-bounded to §1, finding belongs to §2."""
+        # Spec B §9.1 architect ruling accepts the residual pre-submit
+        # TOCTOU window for this ship: with the 30s cycle period it is
+        # bounded to roughly one tick. If this has to close further, the
+        # promotion path is §9.3 event subscriptions, not another
+        # freshness comparison here. See K2Bi-Vault/proposals/
+        # 2026-05-14_spec-b-section9-1-disposition.md.
         if side.lower() != "buy":
             return False
 
         symbol_for_journal = symbol.upper()
+        position_source = self._position_source
+        position_visibility_valid = self._position_visibility_valid
         try:
-            broker_positions = await self.connector.get_positions()
+            position_snapshot = await self.connector.get_positions()
+            position_source = position_snapshot.source
+            position_visibility_valid = position_snapshot.valid
+            broker_positions = _require_valid_position_snapshot(
+                position_snapshot,
+                phase=abort_phase,
+            )
         except ConnectorError as exc:
+            payload = {
+                "strategy_id": snap.name,
+                "symbol": symbol_for_journal,
+                "target_qty": target_qty,
+                "cycle_id": trade_id,
+                "abort_phase": abort_phase,
+                "error": str(exc),
+                "error_class": type(exc).__name__,
+                "position_source": position_source or "unknown",
+                "position_visibility_valid": position_visibility_valid,
+            }
+            validate_cycle_skipped_position_query_failed_payload(payload)
             self.journal.append(
                 "cycle_skipped_position_query_failed",
-                payload={
-                    "strategy_id": snap.name,
-                    "symbol": symbol_for_journal,
-                    "target_qty": target_qty,
-                    "cycle_id": trade_id,
-                    "abort_phase": abort_phase,
-                    "error": str(exc),
-                    "error_class": type(exc).__name__,
-                },
+                payload=payload,
                 strategy=snap.name,
                 trade_id=trade_id,
                 ticker=symbol_for_journal,
@@ -1932,7 +2082,7 @@ class Engine:
                 side=order.side,
                 target_qty=order.qty,
                 trade_id=trade_id,
-                abort_phase="pre_submit_recheck",
+                abort_phase=ABORT_PHASE_PRE_SUBMIT_RECHECK,
             ):
                 self.state = EngineState.CONNECTED_IDLE
                 return
@@ -2220,7 +2370,10 @@ class Engine:
         self.state = EngineState.RECONCILING
         # Refresh positions from broker (broker is authoritative).
         try:
-            self._positions = await self.connector.get_positions()
+            self._positions = _require_valid_position_snapshot(
+                await self.connector.get_positions(),
+                phase="reconcile_fill",
+            )
         except (AuthRequiredError, DisconnectedError) as exc:
             await self._enter_disconnected(
                 result,
@@ -2434,7 +2587,10 @@ class Engine:
         CONNECTED_IDLE; the next tick's own broker read will catch up
         (engine is tick-driven, not event-driven for recovery)."""
         try:
-            self._positions = await self.connector.get_positions()
+            self._positions = _require_valid_position_snapshot(
+                await self.connector.get_positions(),
+                phase="refresh_positions_after_terminal",
+            )
         except (AuthRequiredError, DisconnectedError) as exc:
             await self._enter_disconnected(
                 result, exc, auth=isinstance(exc, AuthRequiredError)

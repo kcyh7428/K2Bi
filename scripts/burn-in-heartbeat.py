@@ -71,6 +71,7 @@ ANOMALY_EVENTS = frozenset(
         "circuit_breaker_tripped_rapid_fire",
         "JournalDurabilityError",
         "engine_stopped",
+        "position_visibility_lost",
     }
 )
 
@@ -477,6 +478,7 @@ def _payload_detail(event: dict[str, Any]) -> str:
         "broker_perm_id",
         "qty",
         "reason",
+        "source",
         "error_class",
         "error",
         "pid",

@@ -16,7 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,41 @@ class BrokerPosition:
     ticker: str
     qty: int
     avg_price: Decimal
+
+
+POSITION_SOURCE_LIVE_REQ_POSITIONS = "live_reqPositions"
+POSITION_SOURCE_TIMEOUT_FALLBACK = "timeout-fallback"
+POSITION_SOURCE_DISCONNECTED = "disconnected"
+PositionSnapshotSource = Literal[
+    "live_reqPositions",
+    "timeout-fallback",
+    "disconnected",
+]
+
+
+@dataclass(frozen=True)
+class PositionSnapshot:
+    """Point-in-time broker position read plus visibility validity.
+
+    `valid=False` means broker visibility is unknown. Callers must not
+    treat `positions=[]` in that state as proof the account is flat.
+    """
+
+    positions: list[BrokerPosition]
+    valid: bool
+    source: PositionSnapshotSource
+    fetched_at: datetime | None
+
+    def __post_init__(self) -> None:
+        if self.source in (
+            POSITION_SOURCE_TIMEOUT_FALLBACK,
+            POSITION_SOURCE_DISCONNECTED,
+        ):
+            if self.valid:
+                raise ValueError(
+                    f"PositionSnapshot invariant violated: source={self.source!r} "
+                    f"requires valid=False, got valid=True"
+                )
 
 
 @dataclass(frozen=True)
@@ -233,7 +268,7 @@ class IBKRConnectorProtocol(Protocol):
     def connection_status(self) -> ConnectionStatus: ...
 
     async def get_account_summary(self) -> AccountSummary: ...
-    async def get_positions(self) -> list[BrokerPosition]: ...
+    async def get_positions(self) -> PositionSnapshot: ...
     async def get_open_orders(self) -> list[BrokerOpenOrder]: ...
     async def get_marks(self, tickers: list[str]) -> dict[str, Decimal]: ...
 

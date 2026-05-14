@@ -119,6 +119,23 @@ class ConnectorError(Exception):
 
 
 class BurnInHeartbeatTests(unittest.TestCase):
+    def test_spec_b_section_9_1_events_are_schema_known_and_classified(self) -> None:
+        from execution.journal.schema import (
+            EVENT_TYPES,
+            EVENT_TYPES_V2_ADDITIVE_SPEC_B_SECTION_9_1,
+        )
+
+        module = _load_module()
+        classified = (
+            module.ANOMALY_EVENTS
+            | module.ROUTINE_ALWAYS
+            | module.ROUTINE_ONCE_PER_BOOT
+        )
+
+        self.assertEqual(module.EVENT_TYPES, EVENT_TYPES)
+        self.assertLessEqual(EVENT_TYPES_V2_ADDITIVE_SPEC_B_SECTION_9_1, EVENT_TYPES)
+        self.assertLessEqual(EVENT_TYPES_V2_ADDITIVE_SPEC_B_SECTION_9_1, classified)
+
     def _run(
         self,
         module: Any,
@@ -180,6 +197,32 @@ class BurnInHeartbeatTests(unittest.TestCase):
         self.assertIn("2 anomalies", out)
         self.assertIn("2026-05-13T13:46:00+00:00 engine_started", out)
         self.assertIn("2026-05-13T14:05:00+00:00 engine_started", out)
+
+    def test_position_visibility_lost_reports_source_as_anomaly(self) -> None:
+        module = _load_module()
+        with tempfile.TemporaryDirectory() as td:
+            vault_root = Path(td)
+            _seed_journal(
+                vault_root,
+                "2026-05-14",
+                [
+                    _event(
+                        "position_visibility_lost",
+                        "id1",
+                        payload={
+                            "cycle_id": "cycle-1",
+                            "source": "timeout-fallback",
+                            "last_valid_age_seconds": 31.0,
+                        },
+                    )
+                ],
+            )
+
+            code, out = self._run(module, vault_root, FakeIB())
+
+        self.assertEqual(code, 0)
+        self.assertIn("1 anomalies", out)
+        self.assertIn("position_visibility_lost source=timeout-fallback", out)
 
     def test_broker_unreachable_exits_1_and_reports_anomaly(self) -> None:
         module = _load_module()

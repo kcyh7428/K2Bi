@@ -18,6 +18,7 @@ from execution.connectors.types import (
     BrokerPosition,
 )
 from execution.engine import recovery
+from execution.journal.schema import ABORT_PHASE_PRE_SUBMIT_RECHECK
 
 
 NOW = datetime(2026, 5, 5, 12, 0, tzinfo=timezone.utc)
@@ -731,6 +732,89 @@ class KillBlockedClearsProposalTests(unittest.TestCase):
         ]
         self.assertEqual(pending_events, [])
         self.assertEqual(result.status, recovery.RecoveryStatus.CLEAN)
+
+
+class PreSubmitPositionQueryFailureClearsProposalTests(unittest.TestCase):
+    """A pre-submit position read failure after order_proposed means the
+    order never reached the broker and must not replay as pending."""
+
+    def _tail(self, *, abort_phase: str) -> list[dict]:
+        return [
+            {
+                "ts": EARLIER.isoformat(),
+                "event_type": "order_proposed",
+                "trade_id": "T1",
+                "journal_entry_id": "J1",
+                "strategy": "spy-rotational",
+                "git_sha": "abc",
+                "ticker": "SPY",
+                "side": "buy",
+                "qty": 10,
+                "payload": {
+                    "ticker": "SPY",
+                    "side": "buy",
+                    "qty": 10,
+                    "limit_price": "500",
+                    "submitted_at": EARLIER.isoformat(),
+                },
+            },
+            {
+                "ts": EARLIER.isoformat(),
+                "event_type": "cycle_skipped_position_query_failed",
+                "trade_id": "T1",
+                "journal_entry_id": "J2",
+                "strategy": "spy-rotational",
+                "git_sha": "abc",
+                "ticker": "SPY",
+                "side": "buy",
+                "qty": 10,
+                "payload": {
+                    "strategy_id": "spy-rotational",
+                    "symbol": "SPY",
+                    "target_qty": 10,
+                    "cycle_id": "T1",
+                    "abort_phase": abort_phase,
+                    "error": "broker position visibility invalid during pre_submit_recheck",
+                    "error_class": "DisconnectedError",
+                },
+            },
+        ]
+
+    def test_pre_submit_position_query_failure_clears_proposal(self):
+        tail = self._tail(abort_phase=ABORT_PHASE_PRE_SUBMIT_RECHECK)
+        result = recovery.reconcile(
+            journal_tail=tail,
+            broker_positions=[],
+            broker_open_orders=[],
+            broker_order_status=[],
+            now=NOW,
+        )
+
+        pending_events = [
+            e for e in result.events
+            if e.event_type == "recovery_reconciled"
+            and e.payload.get("case") == "pending_no_broker_counterpart"
+        ]
+        self.assertEqual(pending_events, [])
+        self.assertEqual(result.status, recovery.RecoveryStatus.CLEAN)
+
+    def test_non_pre_submit_abort_phase_does_not_clear_proposal(self):
+        tail = self._tail(abort_phase="pre_submit")
+        result = recovery.reconcile(
+            journal_tail=tail,
+            broker_positions=[],
+            broker_open_orders=[],
+            broker_order_status=[],
+            now=NOW,
+        )
+
+        pending_events = [
+            e for e in result.events
+            if e.event_type == "recovery_reconciled"
+            and e.payload.get("case") == "pending_no_broker_counterpart"
+        ]
+        self.assertEqual(len(pending_events), 1)
+        self.assertEqual(result.status, recovery.RecoveryStatus.CATCH_UP)
 
 
 class PartialFillMidstreamTests(unittest.TestCase):

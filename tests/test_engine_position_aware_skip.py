@@ -10,8 +10,14 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from execution.connectors.mock import MockIBKRConnector
-from execution.connectors.types import BrokerPosition, ConnectorError
+from execution.connectors.types import (
+    BrokerPosition,
+    ConnectorError,
+    POSITION_SOURCE_LIVE_REQ_POSITIONS,
+    PositionSnapshot,
+)
 from execution.engine.main import DEFAULT_TICK_SECONDS, Engine, EngineConfig, EngineState
+from execution.journal.schema import ABORT_PHASE_PRE_SUBMIT_RECHECK
 from execution.journal.writer import JournalWriter
 
 
@@ -137,15 +143,12 @@ class PositionAwareSkipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tick.orders_submitted, 0)
         self.assertEqual(tick.state_after, EngineState.CONNECTED_IDLE)
         self.assertEqual(len(self.connector.submitted_orders), 0)
-        skips = self._events("cycle_skipped_existing_position")
+        skips = self._events("cycle_evaluated_skip_position_held")
         self.assertEqual(len(skips), 1)
         self.assertEqual(skips[0]["strategy"], "spy-rotational")
         self.assertEqual(skips[0]["payload"]["symbol"], "SPY")
         self.assertEqual(skips[0]["payload"]["current_qty"], 10)
         self.assertEqual(skips[0]["payload"]["target_qty"], 10)
-        self.assertEqual(
-            skips[0]["payload"]["position_state"], "at_target"
-        )
 
     async def test_g2_zero_position_permits_buy(self) -> None:
         await self._init_engine()
@@ -168,19 +171,16 @@ class PositionAwareSkipTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(tick.orders_submitted, 0)
         self.assertEqual(len(self.connector.submitted_orders), 0)
-        skips = self._events("cycle_skipped_existing_position")
+        skips = self._events("cycle_evaluated_skip_position_held")
         self.assertEqual(len(skips), 1)
         self.assertEqual(skips[0]["payload"]["symbol"], "SPY")
         self.assertEqual(skips[0]["payload"]["current_qty"], 3)
         self.assertEqual(skips[0]["payload"]["target_qty"], 10)
-        self.assertEqual(
-            skips[0]["payload"]["position_state"], "partial"
-        )
 
     async def test_g4_position_query_failure_fails_closed(self) -> None:
         await self._init_engine()
 
-        async def fail_positions() -> list[BrokerPosition]:
+        async def fail_positions() -> PositionSnapshot:
             raise ConnectorError("position query unavailable")
 
         self.connector.get_positions = fail_positions  # type: ignore[method-assign]
@@ -195,11 +195,7 @@ class PositionAwareSkipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self._events("order_proposed"), [])
         self.assertEqual(self._events("order_submitted"), [])
         failures = self._events("cycle_skipped_position_query_failed")
-        self.assertEqual(len(failures), 1)
-        self.assertEqual(failures[0]["strategy"], "spy-rotational")
-        self.assertEqual(failures[0]["payload"]["symbol"], "SPY")
-        self.assertEqual(failures[0]["payload"]["abort_phase"], "decision")
-        self.assertIn("position query unavailable", failures[0]["payload"]["error"])
+        self.assertEqual(failures, [])
 
     async def test_position_change_between_check_and_submit_blocks_buy(self) -> None:
         await self._init_engine()
@@ -208,10 +204,17 @@ class PositionAwareSkipTests(unittest.IsolatedAsyncioTestCase):
             [BrokerPosition(ticker="SPY", qty=10, avg_price=Decimal("500"))],
         ]
 
-        async def sequence_positions() -> list[BrokerPosition]:
+        async def sequence_positions() -> PositionSnapshot:
             if position_snapshots:
-                return position_snapshots.pop(0)
-            return []
+                positions = position_snapshots.pop(0)
+            else:
+                positions = []
+            return PositionSnapshot(
+                positions=positions,
+                valid=True,
+                source=POSITION_SOURCE_LIVE_REQ_POSITIONS,
+                fetched_at=datetime.now(timezone.utc),
+            )
 
         self.connector.get_positions = sequence_positions  # type: ignore[method-assign]
 
@@ -226,7 +229,7 @@ class PositionAwareSkipTests(unittest.IsolatedAsyncioTestCase):
             skips[0]["payload"]["position_state"], "at_target"
         )
 
-    async def test_position_skip_does_not_mutate_engine_position_cache(self) -> None:
+    async def test_cycle_top_position_refresh_mutates_engine_position_cache(self) -> None:
         await self._init_engine()
         self.assertEqual(self.engine._positions, [])
         self.connector.positions = [
@@ -235,7 +238,7 @@ class PositionAwareSkipTests(unittest.IsolatedAsyncioTestCase):
 
         await self.engine.tick_once()
 
-        self.assertEqual(self.engine._positions, [])
+        self.assertEqual(self.engine._positions, self.connector.positions)
 
     async def test_existing_position_skip_journals_normalized_symbol(self) -> None:
         await self._unpatch_now()
@@ -250,7 +253,7 @@ class PositionAwareSkipTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(tick.orders_submitted, 0)
         self.assertEqual(len(self.connector.submitted_orders), 0)
-        skips = self._events("cycle_skipped_existing_position")
+        skips = self._events("cycle_evaluated_skip_position_held")
         self.assertEqual(len(skips), 1)
         self.assertEqual(skips[0]["payload"]["symbol"], "SPY")
         self.assertEqual(skips[0]["ticker"], "SPY")
@@ -259,14 +262,20 @@ class PositionAwareSkipTests(unittest.IsolatedAsyncioTestCase):
         await self._init_engine()
         position_snapshots: list[list[BrokerPosition] | Exception] = [
             [],
+            [],
             ConnectorError("pre-submit position query unavailable"),
         ]
 
-        async def sequence_positions() -> list[BrokerPosition]:
+        async def sequence_positions() -> PositionSnapshot:
             next_snapshot = position_snapshots.pop(0)
             if isinstance(next_snapshot, Exception):
                 raise next_snapshot
-            return next_snapshot
+            return PositionSnapshot(
+                positions=next_snapshot,
+                valid=True,
+                source=POSITION_SOURCE_LIVE_REQ_POSITIONS,
+                fetched_at=datetime.now(timezone.utc),
+            )
 
         self.connector.get_positions = sequence_positions  # type: ignore[method-assign]
 
@@ -284,9 +293,14 @@ class PositionAwareSkipTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(submissions), 0)
         self.assertEqual(failures[0]["trade_id"], proposals[0]["trade_id"])
         self.assertEqual(
-            failures[0]["payload"]["abort_phase"], "pre_submit_recheck"
+            failures[0]["payload"]["abort_phase"], ABORT_PHASE_PRE_SUBMIT_RECHECK
         )
         self.assertEqual(failures[0]["payload"]["symbol"], "SPY")
+        self.assertEqual(
+            failures[0]["payload"]["position_source"],
+            POSITION_SOURCE_LIVE_REQ_POSITIONS,
+        )
+        self.assertTrue(failures[0]["payload"]["position_visibility_valid"])
         self.assertIn(
             "pre-submit position query unavailable",
             failures[0]["payload"]["error"],

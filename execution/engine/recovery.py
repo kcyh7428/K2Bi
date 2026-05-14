@@ -37,6 +37,7 @@ from typing import Any, Iterable
 
 from .recovery_context import _RECOVERY_CONTEXT_TOKEN
 from ..journal.reader import is_terminal_signal_event
+from ..journal.schema import ABORT_PHASE_PRE_SUBMIT_RECHECK
 
 
 LOG = logging.getLogger("k2bi.engine.recovery")
@@ -1633,6 +1634,13 @@ def _pending_from_journal(
             # per_key would misclassify every kill-during-submit case
             # as pending_no_broker_counterpart on restart.
             per_key.pop(key, None)
+        elif event_type == "cycle_skipped_position_query_failed":
+            # Spec B §9.1: a pre-submit position visibility failure can
+            # occur after order_proposed but before any broker call. The
+            # order was intentionally never sent, so replay must clear
+            # the proposal just like kill_blocked.
+            if payload.get("abort_phase") == ABORT_PHASE_PRE_SUBMIT_RECHECK:
+                per_key.pop(key, None)
         elif event_type == "recovery_reconciled":
             case = payload.get("case")
             if case in terminal_cases:

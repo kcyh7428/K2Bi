@@ -10,6 +10,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from execution.connectors.mock import MockIBKRConnector
+from execution.connectors.types import BrokerPosition
 from execution.engine.main import DEFAULT_TICK_SECONDS, Engine, EngineConfig, EngineState
 from execution.journal.writer import JournalWriter
 from execution.strategies import runner as strategy_runner
@@ -123,8 +124,8 @@ class RunnerObservabilityTests(unittest.IsolatedAsyncioTestCase):
         ]
 
     async def test_d8_3_1_position_held_emits_observability_event(self) -> None:
-        self.engine._positions = [
-            Position(ticker="SPY", qty=10, avg_price=Decimal("500"))
+        self.connector.positions = [
+            BrokerPosition(ticker="SPY", qty=10, avg_price=Decimal("500"))
         ]
 
         tick = await self.engine.tick_once()
@@ -147,6 +148,9 @@ class RunnerObservabilityTests(unittest.IsolatedAsyncioTestCase):
             event["payload"]["evaluation_timestamp"],
             _mid_session_utc().isoformat(),
         )
+        self.assertEqual(event["payload"]["position_source"], "live_reqPositions")
+        self.assertEqual(event["payload"]["position_age_seconds"], 0.0)
+        self.assertTrue(event["payload"]["position_visibility_valid"])
 
         second_tick = await self.engine.tick_once()
 
@@ -168,8 +172,8 @@ class RunnerObservabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self._events("cycle_evaluated_skip_position_held"), [])
 
     async def test_observability_write_failure_logs_and_continues(self) -> None:
-        self.engine._positions = [
-            Position(ticker="SPY", qty=10, avg_price=Decimal("500"))
+        self.connector.positions = [
+            BrokerPosition(ticker="SPY", qty=10, avg_price=Decimal("500"))
         ]
         original_append = self.engine.journal.append
 
@@ -232,8 +236,8 @@ class RunnerObservabilityTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_d8_3_3_partial_position_emits_observability_event(self) -> None:
-        self.engine._positions = [
-            Position(ticker="SPY", qty=3, avg_price=Decimal("500"))
+        self.connector.positions = [
+            BrokerPosition(ticker="SPY", qty=3, avg_price=Decimal("500"))
         ]
 
         tick = await self.engine.tick_once()

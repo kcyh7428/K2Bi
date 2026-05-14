@@ -21,6 +21,7 @@ import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
+from types import SimpleNamespace
 
 from execution.connectors.ibkr import (
     IBKR_CALL_TIMEOUT_SECONDS,
@@ -28,7 +29,11 @@ from execution.connectors.ibkr import (
 )
 from execution.connectors.types import (
     AccountSummary,
+    POSITION_SOURCE_DISCONNECTED,
+    POSITION_SOURCE_LIVE_REQ_POSITIONS,
+    POSITION_SOURCE_TIMEOUT_FALLBACK,
     DisconnectedError,
+    PositionSnapshot,
 )
 
 
@@ -100,10 +105,74 @@ class Q34ReadTimeoutReturnsEmptyTests(unittest.IsolatedAsyncioTestCase):
     AccountSummary) on timeout. Caller + Q39-B recovery handle the
     empty case as "broker visibility limited"."""
 
-    async def test_get_positions_timeout_returns_empty_list(self):
+    async def test_get_positions_timeout_returns_invalid_timeout_snapshot(self):
         conn = _make_connector_with_hanging_ib()
         result = await conn.get_positions()
-        self.assertEqual(result, [])
+        self.assertEqual(
+            result,
+            PositionSnapshot(
+                positions=[],
+                valid=False,
+                source=POSITION_SOURCE_TIMEOUT_FALLBACK,
+                fetched_at=None,
+            ),
+        )
+
+    async def test_get_positions_disconnected_returns_invalid_snapshot(self):
+        conn = _make_connector_with_hanging_ib()
+        conn._connected = False
+
+        result = await conn.get_positions()
+
+        self.assertEqual(
+            result,
+            PositionSnapshot(
+                positions=[],
+                valid=False,
+                source=POSITION_SOURCE_DISCONNECTED,
+                fetched_at=None,
+            ),
+        )
+
+    async def test_get_positions_live_empty_returns_valid_empty_snapshot(self):
+        class _EmptyPositionsIB(_HangingIB):
+            async def reqPositionsAsync(self, *a, **kw) -> list[Any]:
+                return []
+
+        conn = _make_connector_with_hanging_ib()
+        conn._ib = _EmptyPositionsIB()
+
+        result = await conn.get_positions()
+
+        self.assertEqual(result.positions, [])
+        self.assertTrue(result.valid)
+        self.assertEqual(result.source, POSITION_SOURCE_LIVE_REQ_POSITIONS)
+        self.assertIsNotNone(result.fetched_at)
+
+    async def test_get_positions_live_non_empty_returns_valid_snapshot(self):
+        class _OnePositionIB(_HangingIB):
+            async def reqPositionsAsync(self, *a, **kw) -> list[Any]:
+                return [
+                    SimpleNamespace(
+                        account="DUQ-TEST",
+                        contract=SimpleNamespace(symbol="SPY"),
+                        position=10,
+                        avgCost="500.00",
+                    )
+                ]
+
+        conn = _make_connector_with_hanging_ib()
+        conn._account_id = "DUQ-TEST"
+        conn._ib = _OnePositionIB()
+
+        result = await conn.get_positions()
+
+        self.assertTrue(result.valid)
+        self.assertEqual(result.source, POSITION_SOURCE_LIVE_REQ_POSITIONS)
+        self.assertEqual(len(result.positions), 1)
+        self.assertEqual(result.positions[0].ticker, "SPY")
+        self.assertEqual(result.positions[0].qty, 10)
+        self.assertEqual(result.positions[0].avg_price, Decimal("500.00"))
 
     async def test_get_open_orders_timeout_returns_empty_list(self):
         conn = _make_connector_with_hanging_ib()

@@ -27,6 +27,8 @@ from .types import (
     BrokerRejectionError,
     ConnectionStatus,
     DisconnectedError,
+    POSITION_SOURCE_LIVE_REQ_POSITIONS,
+    PositionSnapshot,
 )
 
 
@@ -145,9 +147,14 @@ class MockIBKRConnector:
         self._require_connected()
         return self.account_summary
 
-    async def get_positions(self) -> list[BrokerPosition]:
+    async def get_positions(self) -> PositionSnapshot:
         self._require_connected()
-        return list(self.positions)
+        return PositionSnapshot(
+            positions=list(self.positions),
+            valid=True,
+            source=POSITION_SOURCE_LIVE_REQ_POSITIONS,
+            fetched_at=datetime.now(timezone.utc),
+        )
 
     async def get_open_orders(self) -> list[BrokerOpenOrder]:
         self._require_connected()

@@ -13,7 +13,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from execution.connectors.ibkr import IBKRConnector
-from execution.connectors.types import BrokerOrderAck, BrokerPosition, BrokerRejectionError
+from execution.connectors.types import (
+    BrokerOrderAck,
+    BrokerPosition,
+    BrokerRejectionError,
+    POSITION_SOURCE_LIVE_REQ_POSITIONS,
+    PositionSnapshot,
+)
 from execution.engine import recovery as recovery_mod
 from execution.engine import recovery_context as recovery_context_mod
 from execution.engine.main import Engine
@@ -122,8 +128,13 @@ class _AttachmentConnector:
         self.positions = positions or []
         self.stop_orders: list[dict] = []
 
-    async def get_positions(self) -> list[BrokerPosition]:
-        return list(self.positions)
+    async def get_positions(self) -> PositionSnapshot:
+        return PositionSnapshot(
+            positions=list(self.positions),
+            valid=True,
+            source=POSITION_SOURCE_LIVE_REQ_POSITIONS,
+            fetched_at=datetime.now(timezone.utc),
+        )
 
     async def submit_standalone_stop_order(
         self,

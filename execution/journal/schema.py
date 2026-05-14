@@ -51,6 +51,10 @@ v2 additive (2026-05-11, Spec B §4):
 v2 additive (2026-05-12, Spec B §8):
     - Added post-fill durability, singular-pending recovery self-heal, and
       runner-side position-held observability events.
+
+v2 additive (2026-05-14, Spec B §9.1):
+    - Added position_visibility_lost and position-visibility metadata on
+      cycle_evaluated_skip_position_held.
 """
 
 from __future__ import annotations
@@ -62,6 +66,7 @@ from typing import Any
 
 SCHEMA_VERSION = 2
 CURRENT_SCHEMA_VERSION = SCHEMA_VERSION
+ABORT_PHASE_PRE_SUBMIT_RECHECK = "pre_submit_recheck"
 
 # Event types present since v1. Kept as a separate frozenset so the
 # journal-schema.md doc + tests can reference "what v1 shipped with"
@@ -166,6 +171,12 @@ EVENT_TYPES_V2_ADDITIVE_SPEC_B_SECTION_8 = frozenset(
     }
 )
 
+EVENT_TYPES_V2_ADDITIVE_SPEC_B_SECTION_9_1 = frozenset(
+    {
+        "position_visibility_lost",
+    }
+)
+
 EVENT_TYPES = (
     EVENT_TYPES_V1
     | EVENT_TYPES_V2_ADDITIONS
@@ -175,6 +186,7 @@ EVENT_TYPES = (
     | EVENT_TYPES_V2_ADDITIVE_SPEC_B_SECTION_3
     | EVENT_TYPES_V2_ADDITIVE_SPEC_B_SECTION_4
     | EVENT_TYPES_V2_ADDITIVE_SPEC_B_SECTION_8
+    | EVENT_TYPES_V2_ADDITIVE_SPEC_B_SECTION_9_1
 )
 
 KNOWN_SCHEMA_VERSIONS = frozenset({1, 2})
@@ -425,6 +437,36 @@ def _require_decimal_str(payload: dict[str, Any], event_type: str, field: str) -
         )
 
 
+def _require_bool(payload: dict[str, Any], event_type: str, field: str) -> bool:
+    value = payload.get(field)
+    if not isinstance(value, bool):
+        raise JournalSchemaError(
+            f"{event_type} {field} must be bool, got {value!r}"
+        )
+    return value
+
+
+def _require_non_negative_seconds_or_none(
+    payload: dict[str, Any],
+    event_type: str,
+    field: str,
+) -> float | None:
+    value = payload.get(field)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise JournalSchemaError(
+            f"{event_type} {field} must be non-negative seconds or None, "
+            f"got {value!r}"
+        )
+    seconds = float(value)
+    if seconds < 0:
+        raise JournalSchemaError(
+            f"{event_type} {field} must be non-negative, got {value!r}"
+        )
+    return seconds
+
+
 def validate_protective_stop_attached_payload(payload: dict[str, Any]) -> None:
     event_type = "protective_stop_attached_to_existing_position"
     _require_non_empty_str(payload, event_type, "strategy_id")
@@ -470,6 +512,25 @@ def validate_protective_stop_attach_refused_no_context_payload(
     _require_non_empty_str(payload, event_type, "reason")
 
 
+def validate_cycle_skipped_position_query_failed_payload(
+    payload: dict[str, Any],
+) -> None:
+    event_type = "cycle_skipped_position_query_failed"
+    _require_non_empty_str(payload, event_type, "strategy_id")
+    _require_non_empty_str(payload, event_type, "symbol")
+    target_qty = _require_int(payload, event_type, "target_qty")
+    if target_qty <= 0:
+        raise JournalSchemaError(
+            f"{event_type} target_qty must be positive, got {target_qty!r}"
+        )
+    _require_non_empty_str(payload, event_type, "cycle_id")
+    _require_non_empty_str(payload, event_type, "abort_phase")
+    _require_non_empty_str(payload, event_type, "error")
+    _require_non_empty_str(payload, event_type, "error_class")
+    _require_non_empty_str(payload, event_type, "position_source")
+    _require_bool(payload, event_type, "position_visibility_valid")
+
+
 def validate_cycle_evaluated_skip_position_held_payload(
     payload: dict[str, Any],
 ) -> None:
@@ -499,3 +560,30 @@ def validate_cycle_evaluated_skip_position_held_payload(
             f"{event_type} evaluation_timestamp must include timezone, "
             f"got {raw_ts!r}"
         )
+    _require_non_empty_str(payload, event_type, "position_source")
+    age = _require_non_negative_seconds_or_none(
+        payload,
+        event_type,
+        "position_age_seconds",
+    )
+    if age is None:
+        raise JournalSchemaError(
+            f"{event_type} position_age_seconds must be present when "
+            "position visibility is valid"
+        )
+    visible = _require_bool(payload, event_type, "position_visibility_valid")
+    if visible is not True:
+        raise JournalSchemaError(
+            f"{event_type} position_visibility_valid must be True, got {visible!r}"
+        )
+
+
+def validate_position_visibility_lost_payload(payload: dict[str, Any]) -> None:
+    event_type = "position_visibility_lost"
+    _require_non_empty_str(payload, event_type, "cycle_id")
+    _require_non_empty_str(payload, event_type, "source")
+    _require_non_negative_seconds_or_none(
+        payload,
+        event_type,
+        "last_valid_age_seconds",
+    )

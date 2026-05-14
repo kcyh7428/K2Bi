@@ -209,6 +209,9 @@ def journal_cycle_evaluated_skip_position_held(
     market: MarketSnapshot,
     current_qty: int,
     cycle_id: str,
+    position_source: str,
+    position_age_seconds: float,
+    position_visibility_valid: bool,
 ) -> None:
     spec = snapshot.order_spec
     symbol = spec.ticker.upper()
@@ -220,6 +223,9 @@ def journal_cycle_evaluated_skip_position_held(
         "target_qty": spec.qty,
         "cycle_id": cycle_id,
         "evaluation_timestamp": evaluation_time.isoformat(),
+        "position_source": position_source,
+        "position_age_seconds": position_age_seconds,
+        "position_visibility_valid": position_visibility_valid,
     }
     validate_cycle_evaluated_skip_position_held_payload(payload)
     journal.append(
@@ -434,7 +440,12 @@ async def attach_protective_stop_to_existing_position(
             f"recovery stop qty for {symbol_norm} must be positive, got {qty}"
         )
 
-    positions = await connector.get_positions()
+    snapshot = await connector.get_positions()
+    if not snapshot.valid:
+        raise PositionDriftError(
+            f"broker position visibility invalid for {symbol_norm}: {snapshot.source}"
+        )
+    positions = snapshot.positions
     matching_position_qtys = [
         Decimal(str(position.qty))
         for position in positions

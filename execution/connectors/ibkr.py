@@ -49,6 +49,10 @@ from .types import (
     ConnectionStatus,
     ConnectorError,
     DisconnectedError,
+    POSITION_SOURCE_DISCONNECTED,
+    POSITION_SOURCE_LIVE_REQ_POSITIONS,
+    POSITION_SOURCE_TIMEOUT_FALLBACK,
+    PositionSnapshot,
 )
 
 
@@ -372,7 +376,7 @@ class IBKRConnector:
             currency=currency,
         )
 
-    async def get_positions(self) -> list[BrokerPosition]:
+    async def get_positions(self) -> PositionSnapshot:
         """Broker positions filtered to the configured account_id.
 
         Codex R16 P1: `reqPositionsAsync` returns every position
@@ -383,16 +387,43 @@ class IBKRConnector:
         another account's ticker) or mis-size new orders. Matches the
         filter `get_account_summary` already applies.
         """
-        self._require_connected()
         try:
+            self._require_connected()
             rows = await _bounded_read(
                 self,
                 self._ib.reqPositionsAsync(),
                 call_name="positions",
-                empty=[],
+                empty=None,
+            )
+            if rows is None:
+                return PositionSnapshot(
+                    positions=[],
+                    valid=False,
+                    source=POSITION_SOURCE_TIMEOUT_FALLBACK,
+                    fetched_at=None,
+                )
+        except AuthRequiredError:
+            raise
+        except DisconnectedError:
+            return PositionSnapshot(
+                positions=[],
+                valid=False,
+                source=POSITION_SOURCE_DISCONNECTED,
+                fetched_at=None,
             )
         except Exception as exc:
-            self._classify_and_raise(exc, phase="positions")
+            try:
+                self._classify_and_raise(exc, phase="positions")
+            except AuthRequiredError:
+                raise
+            except DisconnectedError:
+                return PositionSnapshot(
+                    positions=[],
+                    valid=False,
+                    source=POSITION_SOURCE_DISCONNECTED,
+                    fetched_at=None,
+                )
+            raise
 
         out: list[BrokerPosition] = []
         for row in rows:
@@ -413,7 +444,12 @@ class IBKRConnector:
                     avg_price=Decimal(str(avg)),
                 )
             )
-        return out
+        return PositionSnapshot(
+            positions=out,
+            valid=True,
+            source=POSITION_SOURCE_LIVE_REQ_POSITIONS,
+            fetched_at=datetime.now(timezone.utc),
+        )
 
     async def get_open_orders(self) -> list[BrokerOpenOrder]:
         """Open orders filtered to the configured account_id.
