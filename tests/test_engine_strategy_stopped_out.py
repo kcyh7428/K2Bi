@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from execution.connectors.mock import MockIBKRConnector
 from execution.connectors.types import (
+    BrokerExecution,
     BrokerOrderStatusEvent,
     BrokerPosition,
     POSITION_SOURCE_LIVE_REQ_POSITIONS,
@@ -608,6 +609,66 @@ class StoppedOutLifecycleTests(unittest.IsolatedAsyncioTestCase):
         event = self._events("strategy_stopped_out")[0]
         self.assertEqual(event["payload"]["source"], "recovery_replay")
         self.assertIn("status: stopped_out", self.strategy_path.read_text())
+
+    async def test_s8b_recovery_replay_uses_execution_price_when_status_price_zero(
+        self,
+    ) -> None:
+        engine = self._make_engine()
+        self._load_strategy(engine)
+        self._stub_commit(engine)
+        await self.connector.connect()
+        self.journal.append(
+            "order_submitted",
+            payload={
+                "status": "Submitted",
+                "order_type": "LMT",
+                "limit_price": "34.50",
+                "stop_loss": "30.00",
+                "stop_broker_perm_id": "2000001",
+                "stop_price": "30.00",
+            },
+            strategy=STRATEGY_ID,
+            trade_id="T-restart",
+            ticker="G",
+            side="buy",
+            qty=71,
+            broker_order_id="1000",
+            broker_perm_id="2000000",
+        )
+        self.connector.executions_history = [
+            BrokerExecution(
+                exec_id="0000dc8f.6a7433d6.01.01",
+                broker_order_id="1001",
+                broker_perm_id="2000001",
+                ticker="G",
+                side="sld",
+                qty=71,
+                price=Decimal("32.44"),
+                filled_at=_mid_session_utc(),
+            )
+        ]
+        status = BrokerOrderStatusEvent(
+            broker_order_id="1001",
+            broker_perm_id="2000001",
+            status="Filled",
+            filled_qty=71,
+            remaining_qty=0,
+            avg_fill_price=Decimal("0"),
+            last_update_at=_mid_session_utc(),
+            client_tag=f"k2bi:{STRATEGY_ID}:T-restart:stop",
+        )
+
+        await engine._replay_stopped_out_stop_fills(
+            journal_tail=self.journal.read_all(),
+            broker_status=[status],
+            cycle_id="recovery-replay",
+        )
+
+        event = self._events("strategy_stopped_out")[0]
+        self.assertEqual(event["payload"]["source"], "recovery_replay")
+        self.assertEqual(event["payload"]["fill_perm_id"], 2000001)
+        self.assertEqual(event["payload"]["fill_price"], "32.44")
+        self.assertIn("stopped_out_fill_price: '32.44'", self.strategy_path.read_text())
 
     async def test_s9_new_long_entry_does_not_enter_stop_out_path(self) -> None:
         engine = self._make_engine()

@@ -57,6 +57,7 @@ from yaml.nodes import MappingNode, ScalarNode
 from ..connectors.ibkr import ConnectorImportError
 from ..connectors.types import (
     AuthRequiredError,
+    BrokerExecution,
     BrokerOrderAck,
     BrokerOrderStatusEvent,
     BrokerPosition,
@@ -2352,6 +2353,30 @@ class Engine:
                 return True
         return False
 
+    @staticmethod
+    def _positive_decimal_or_none(raw: Any) -> Decimal | None:
+        try:
+            value = Decimal(str(raw))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        if not value.is_finite() or value <= 0:
+            return None
+        return value
+
+    @staticmethod
+    def _stop_fill_price_from_executions(
+        executions: list[BrokerExecution],
+        *,
+        status: BrokerOrderStatusEvent,
+    ) -> Decimal | None:
+        for execution in executions:
+            if (
+                status.broker_perm_id
+                and execution.broker_perm_id == status.broker_perm_id
+            ) or execution.broker_order_id == status.broker_order_id:
+                return Engine._positive_decimal_or_none(execution.price)
+        return None
+
     async def _replay_stopped_out_stop_fills(
         self,
         *,
@@ -2361,6 +2386,7 @@ class Engine:
     ) -> None:
         curr_positions = self._position_qty_map(self._positions)
         stopped: set[str] = set()
+        broker_executions: list[BrokerExecution] | None = None
         for status in broker_status:
             if status.status != "Filled":
                 continue
@@ -2399,14 +2425,25 @@ class Engine:
             ticker = str(submitted.get("ticker") or "").upper()
             if not ticker or curr_positions.get(ticker, 0) > 0:
                 continue
-            fill_price = status.avg_fill_price
+            fill_price = self._positive_decimal_or_none(status.avg_fill_price)
+            if fill_price is None:
+                if broker_executions is None:
+                    try:
+                        broker_executions = await self.connector.get_executions_since(
+                            status.last_update_at - recovery_mod.DEFAULT_LOOKBACK
+                        )
+                    except (AuthRequiredError, ConnectorError, DisconnectedError):
+                        broker_executions = []
+                fill_price = self._stop_fill_price_from_executions(
+                    broker_executions,
+                    status=status,
+                )
             if fill_price is None:
                 raw_price = submitted_payload.get("stop_price") or submitted_payload.get(
                     "stop_loss"
                 )
-                try:
-                    fill_price = Decimal(str(raw_price))
-                except (InvalidOperation, ValueError, TypeError):
+                fill_price = self._positive_decimal_or_none(raw_price)
+                if fill_price is None:
                     continue
             await self._flip_strategy_to_stopped_out(
                 strategy_id=strategy_id,
